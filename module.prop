@@ -1,0 +1,6 @@
+id=AmberGuard
+name=AmberGuard
+version=v0.1.0
+versionCode=1
+author=mcheiyue
+description=WiFi 5G/2.4G smart band switch daemon (Phase 1 skeleton)

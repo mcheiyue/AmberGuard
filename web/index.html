@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AmberGuard</title>
+<style>
+:root{--bg:#0f1115;--card:#1a1d24;--fg:#e8eaed;--muted:#9aa0a6;--ok:#34a853;--warn:#fbbc04;--bad:#ea4335;--line:#2a2f3a}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+header{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{margin:0;font-size:18px;font-weight:600}
+.badge{font-size:12px;padding:2px 8px;border-radius:999px;background:var(--line);color:var(--muted)}
+.badge.ok{background:#14301f;color:var(--ok)}
+.badge.bad{background:#3a1515;color:var(--bad)}
+.badge.warn{background:#3a3010;color:var(--warn)}
+main{padding:16px 20px;display:grid;gap:12px;max-width:720px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card h2{margin:0 0 10px;font-size:13px;color:var(--muted);font-weight:500;text-transform:none;letter-spacing:.02em}
+.row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.k{color:var(--muted)}
+.v{font-variant-numeric:tabular-nums;text-align:right;word-break:break-all}
+.note{color:var(--muted);font-size:12px;margin-top:8px}
+pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.45 ui-monospace,Consolas,monospace;color:var(--muted);max-height:240px;overflow:auto}
+</style>
+</head>
+<body>
+<header>
+  <h1>AmberGuard <span style="color:var(--muted);font-weight:400;font-size:13px">状态面板</span></h1>
+  <span id="conn" class="badge">连接中…</span>
+</header>
+<main>
+  <section class="card">
+    <h2>当前连接</h2>
+    <div class="row"><span class="k">SSID</span><span class="v" id="ssid">—</span></div>
+    <div class="row"><span class="k">BSSID</span><span class="v" id="bssid">—</span></div>
+    <div class="row"><span class="k">频段</span><span class="v" id="band">—</span></div>
+    <div class="row"><span class="k">RSSI</span><span class="v" id="rssi">—</span></div>
+    <div class="row"><span class="k">接口</span><span class="v" id="iface">—</span></div>
+    <div class="row"><span class="k">wpa 状态</span><span class="v" id="wpa_state">—</span></div>
+  </section>
+  <section class="card">
+    <h2>守护进程</h2>
+    <div class="row"><span class="k">状态机</span><span class="v" id="sm">—</span></div>
+    <div class="row"><span class="k">健康度</span><span class="v" id="health">—</span></div>
+    <div class="row"><span class="k">Phase</span><span class="v" id="phase">1 骨架</span></div>
+    <p class="note">Phase 1 <strong>不自动切换 WiFi</strong>：仅观测与日志。自动切换在 Phase 2。</p>
+  </section>
+  <section class="card">
+    <h2>原始 /api/status</h2>
+    <pre id="raw">等待数据…</pre>
+    <p class="note">每 2 秒轮询 · 仅绑定 127.0.0.1:8080 · 远程请用 SSH 隧道</p>
+  </section>
+</main>
+<script>
+// ponytail: 2s 轮询，无 Chart.js；字段容错以兼容 daemon 骨架 JSON
+const $ = (id) => document.getElementById(id);
+const pick = (o, keys, d = '—') => {
+  for (const k of keys) {
+    if (o == null) break;
+    const parts = k.split('.');
+    let v = o;
+    for (const p of parts) {
+      if (v == null || typeof v !== 'object' || !(p in v)) { v = undefined; break; }
+      v = v[p];
+    }
+    if (v !== undefined && v !== null && v !== '') return v;
+  }
+  return d;
+};
+const set = (id, v) => { $(id).textContent = v == null || v === '' ? '—' : String(v); };
+async function tick() {
+  try {
+    const r = await fetch('/api/status', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    $('conn').textContent = '已连接';
+    $('conn').className = 'badge ok';
+    set('ssid', pick(j, ['ssid', 'wifi.ssid', 'status.ssid', 'connection.ssid']));
+    set('bssid', pick(j, ['bssid', 'wifi.bssid', 'status.bssid', 'connection.bssid']));
+    set('band', pick(j, ['band', 'wifi.band', 'freq_band', 'connection.band']));
+    const rssi = pick(j, ['rssi', 'wifi.rssi', 'signal', 'status.rssi', 'connection.rssi'], null);
+    set('rssi', rssi == null || rssi === '—' ? '—' : (String(rssi).includes('dBm') ? rssi : rssi + ' dBm'));
+    set('iface', pick(j, ['iface', 'interface', 'ifname', 'wifi.iface'], 'wlan0'));
+    set('wpa_state', pick(j, ['wpa_state', 'state', 'wifi.wpa_state', 'status.wpa_state']));
+    set('sm', pick(j, ['state_machine', 'sm', 'sm_state', 'daemon.state']));
+    const h = pick(j, ['health', 'health_score', 'score'], null);
+    set('health', h == null || h === '—' ? '—' : (typeof h === 'number' ? h.toFixed(1) : h));
+    set('phase', pick(j, ['phase'], '1 骨架'));
+    $('raw').textContent = JSON.stringify(j, null, 2);
+  } catch (e) {
+    $('conn').textContent = '离线';
+    $('conn').className = 'badge bad';
+    $('raw').textContent = '拉取失败: ' + e.message + '\n确认 daemon 在 127.0.0.1:8080 运行。';
+  }
+}
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>

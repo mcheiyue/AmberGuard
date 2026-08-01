@@ -1,0 +1,70 @@
+name: Build Magisk Module
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'web/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  ANDROID_PLATFORM: android-24
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: Build daemon
+        working-directory: daemon
+        run: |
+          $env:ANDROID_NDK_HOME = "${{ steps.setup-ndk.outputs.ndk-path }}"
+          cargo ndk -t arm64-v8a -o ../out/jniLibs build --release
+
+      - name: Strip binary
+        run: |
+          $ndk = "${{ steps.setup-ndk.outputs.ndk-path }}"
+          & "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-all out/jniLibs/arm64-v8a/amberguard
+
+      - name: Check size
+        run: |
+          $size = (Get-Item out/jniLibs/arm64-v8a/amberguard).Length
+          Write-Host "Binary size: $size bytes ($([math]::Round($size/1024, 1)) KB)"
+          if ($size -gt 1.2MB) { Write-Host "WARNING: over 1.2MB target" }
+
+      - name: Package Magisk module
+        shell: pwsh
+        run: |
+          $staging = "module_staging"
+          New-Item -ItemType Directory -Force -Path "$staging/system/bin" | Out-Null
+          Copy-Item out/jniLibs/arm64-v8a/amberguard "$staging/system/bin/amberguard"
+          @("module.prop","post-fs-data.sh","service.sh","sepolicy.rule","customize.sh") | ForEach-Object {
+            if (Test-Path $_) { Copy-Item $_ $staging/ }
+          }
+          Compress-Archive -Path "$staging/*" -DestinationPath "AmberGuard-$($env:GITHUB_SHA.substring(0,7)).zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmberGuard-module
+          path: AmberGuard-*.zip
