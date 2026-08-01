@@ -45,7 +45,7 @@ jobs:
       - name: Copy binary
         run: |
           mkdir -p out/jniLibs/arm64-v8a
-          cp target/aarch64-linux-android/release/amberguard out/jniLibs/arm64-v8a/amberguard
+          cp daemon/target/aarch64-linux-android/release/amberguard out/jniLibs/arm64-v8a/amberguard
 
       - name: Strip binary
         run: |
