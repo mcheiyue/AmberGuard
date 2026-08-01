@@ -58,15 +58,17 @@ jobs:
           echo "Binary size: $size bytes ($(( size / 1024 )) KB)"
           if [ "$size" -gt 1258291 ]; then echo "WARNING: over 1.2MB target"; fi
 
-      - name: Package Magisk module
+- name: Package Magisk module
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path zip_root/system/bin | Out-Null
           Copy-Item out/jniLibs/arm64-v8a/amberguard zip_root/system/bin/amberguard
-          @("module.prop","post-fs-data.sh","service.sh","sepolicy.rule","customize.sh") | ForEach-Object {
+          @("module.prop","post-fs-data.sh","service.sh","sepolicy.rule","customize.sh","system.prop") | ForEach-Object {
             if (Test-Path $_) { Copy-Item $_ zip_root/ }
           }
-          # cd into zip_root so files sit at zip root, not inside a subdirectory
+          # 递归拷贝 META-INF（标准 Magisk 模块结构）
+          if (Test-Path META-INF) { Copy-Item -Recurse META-INF zip_root/ }
+          # cd into zip_root so files sit at zip root
           Push-Location zip_root
           Compress-Archive -Path * -DestinationPath "../AmberGuard-$($env:GITHUB_SHA.substring(0,7)).zip" -Force
           Pop-Location
