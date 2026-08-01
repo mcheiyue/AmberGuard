@@ -37,20 +37,21 @@ jobs:
 
       - name: Build daemon
         working-directory: daemon
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          $env:ANDROID_NDK_HOME = "${{ steps.setup-ndk.outputs.ndk-path }}"
           cargo ndk -t arm64-v8a -o ../out/jniLibs build --release
 
       - name: Strip binary
         run: |
-          $ndk = "${{ steps.setup-ndk.outputs.ndk-path }}"
-          & "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-all out/jniLibs/arm64-v8a/amberguard
+          ndk="${{ steps.setup-ndk.outputs.ndk-path }}"
+          "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-all out/jniLibs/arm64-v8a/amberguard
 
       - name: Check size
         run: |
-          $size = (Get-Item out/jniLibs/arm64-v8a/amberguard).Length
-          Write-Host "Binary size: $size bytes ($([math]::Round($size/1024, 1)) KB)"
-          if ($size -gt 1.2MB) { Write-Host "WARNING: over 1.2MB target" }
+          size=$(stat -c%s out/jniLibs/arm64-v8a/amberguard)
+          echo "Binary size: $size bytes ($(( size / 1024 )) KB)"
+          if [ "$size" -gt 1258291 ]; then echo "WARNING: over 1.2MB target"; fi
 
       - name: Package Magisk module
         shell: pwsh
