@@ -40,7 +40,12 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
-          cargo ndk -t arm64-v8a -o ../out/jniLibs build --release --bin amberguard
+          cargo ndk -t arm64-v8a build --release --bin amberguard
+
+      - name: Copy binary
+        run: |
+          mkdir -p out/jniLibs/arm64-v8a
+          cp target/aarch64-linux-android/release/amberguard out/jniLibs/arm64-v8a/amberguard
 
       - name: Strip binary
         run: |
