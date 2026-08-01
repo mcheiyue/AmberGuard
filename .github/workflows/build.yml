@@ -61,13 +61,15 @@ jobs:
       - name: Package Magisk module
         shell: pwsh
         run: |
-          $staging = "module_staging"
-          New-Item -ItemType Directory -Force -Path "$staging/system/bin" | Out-Null
-          Copy-Item out/jniLibs/arm64-v8a/amberguard "$staging/system/bin/amberguard"
+          New-Item -ItemType Directory -Force -Path zip_root/system/bin | Out-Null
+          Copy-Item out/jniLibs/arm64-v8a/amberguard zip_root/system/bin/amberguard
           @("module.prop","post-fs-data.sh","service.sh","sepolicy.rule","customize.sh") | ForEach-Object {
-            if (Test-Path $_) { Copy-Item $_ $staging/ }
+            if (Test-Path $_) { Copy-Item $_ zip_root/ }
           }
-          Compress-Archive -Path "$staging/*" -DestinationPath "AmberGuard-$($env:GITHUB_SHA.substring(0,7)).zip" -Force
+          # cd into zip_root so files sit at zip root, not inside a subdirectory
+          Push-Location zip_root
+          Compress-Archive -Path * -DestinationPath "../AmberGuard-$($env:GITHUB_SHA.substring(0,7)).zip" -Force
+          Pop-Location
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

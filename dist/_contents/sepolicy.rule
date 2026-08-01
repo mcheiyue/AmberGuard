@@ -1,0 +1,27 @@
+# AmberGuard SELinux 静态打底（PLAN §7.3，显式 perm，不展开 AOSP 宏）
+# 类型名以目标机 ls -Z / avc denied 实测为准，以下为起点草稿
+
+# wpa 控制 socket：sock_file 读写 + 目录 search
+allow magisk wpa_socket:sock_file { read write getattr open };
+allow magisk wpa_socket:dir { search getattr };
+allow magisk wifi_data_file:dir { search getattr };
+allow magisk wifi_data_file:sock_file { create read write getattr open unlink };
+
+# netlink（nl80211 走 NETLINK_GENERIC）
+allow magisk netlink_generic_socket:socket { create bind read write getattr setsockopt };
+allow magisk netlink_socket:socket { create bind read write getattr setsockopt };
+
+# HTTP 监听（127.0.0.1:8080）
+allow magisk port_t:tcp_socket { name_bind read write getattr setopt };
+allow magisk node_t:tcp_socket { node_bind read write };
+
+# sysfs 屏状态
+allow magisk sysfs_leds:dir { search getattr };
+allow magisk sysfs_leds:file { read getattr open };
+
+# input event（电源键，可选）
+allow magisk input_device:dir { search getattr };
+allow magisk input_device:chr_file { read getattr open };
+
+# /proc/net/wireless
+allow magisk proc_net:file { read getattr open };
