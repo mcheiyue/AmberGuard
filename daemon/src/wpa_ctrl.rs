@@ -150,13 +150,40 @@ mod platform {
                         ),
                     ))
                 })?;
-                // 权限对齐（wifi 组常需 660）
+                // wpa 进程 uid=wifi(1010)：客户端 socket 必须 wifi 组可写，否则 STATUS 必超时
+                // 实机历史 socket 为 1021:1010 mode 660
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
+                    let path_str = local_path.to_string_lossy().to_string();
+                    // chown wifi:wifi；失败再试 system:wifi(1021 在部分 OEM 上是 radio/system 变体)
+                    let _ = std::process::Command::new("chown")
+                        .args(["1010:1010", &path_str])
+                        .status();
                     let _ = std::fs::set_permissions(
                         &local_path,
                         std::fs::Permissions::from_mode(0o660),
+                    );
+                    // 仍 root 独占则放宽到 666（保底）
+                    if let Ok(meta) = std::fs::metadata(&local_path) {
+                        use std::os::unix::fs::MetadataExt;
+                        if meta.uid() == 0 {
+                            let _ = std::fs::set_permissions(
+                                &local_path,
+                                std::fs::Permissions::from_mode(0o666),
+                            );
+                        }
+                    }
+                    let _ = std::process::Command::new("restorecon")
+                        .arg(&path_str)
+                        .status();
+                    log::info!(
+                        "wpa_ctrl: client sock {} meta={:?}",
+                        path_str,
+                        std::fs::metadata(&local_path).ok().map(|m| {
+                            use std::os::unix::fs::MetadataExt;
+                            format!("uid={} gid={} mode={:o}", m.uid(), m.gid(), m.mode() & 0o777)
+                        })
                     );
                 }
                 self.local_path = Some(local_path);
