@@ -1,8 +1,12 @@
 # Magisk sepolicy：class 与 type 用空格分隔（不是 type:class）
 # 实机：magisk → hal_wifi_supplicant_default；目录 type=wpa_data_file
 
+# Magisk sepolicy：class 与 type 用空格分隔（不是 type:class）
+# 实机：magisk → hal_wifi_supplicant_default；目录 type=wpa_data_file
+
 allow magisk wpa_data_file dir { search getattr write add_name remove_name }
 allow magisk wpa_data_file sock_file { create read write getattr open unlink setattr }
+allow magisk wpa_data_file unix_dgram_socket { create bind connect read write setattr getattr getopt setopt }
 
 allow magisk hal_wifi_supplicant_default unix_dgram_socket { sendto }
 allow hal_wifi_supplicant_default magisk unix_dgram_socket { sendto }
