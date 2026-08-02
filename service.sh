@@ -4,6 +4,7 @@
 
 MODDIR=${0%/*}
 AG_DIR=/data/adb/amberguard
+LOG_DIR=$AG_DIR/log
 LOG=$AG_DIR/service.log
 # 占位路径：后续 cargo-ndk 产物落到 system/bin/amberguard
 DAEMON=$MODDIR/system/bin/amberguard
@@ -12,7 +13,15 @@ MAX_CRASH=5
 # 崩溃间隔退避上限（秒）
 MAX_SLEEP=30
 
-mkdir -p "$AG_DIR"
+mkdir -p "$AG_DIR" "$LOG_DIR"
+
+# service.log 简单轮转（>1MB → .1）
+if [ -f "$LOG" ]; then
+  sz=$(wc -c <"$LOG" 2>/dev/null || echo 0)
+  if [ "$sz" -gt 1048576 ] 2>/dev/null; then
+    mv -f "$LOG" "$LOG.1" 2>/dev/null
+  fi
+fi
 {
   echo "=== AmberGuard service $(date) ==="
   echo "MODDIR=$MODDIR"

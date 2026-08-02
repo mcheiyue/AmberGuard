@@ -1,6 +1,6 @@
 id=AmberGuard
 name=AmberGuard
-version=v0.1.0
-versionCode=1
+version=v0.4.0
+versionCode=4
 author=mcheiyue
-description=WiFi 5G/2.4G smart band switch daemon (Phase 1 skeleton)
+description=WiFi 5G/2.4G 智能双频守护 · Web 面板 http://127.0.0.1:8080 · 支持 KSU WebUI

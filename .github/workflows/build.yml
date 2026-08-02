@@ -71,6 +71,10 @@ jobs:
           for f in module.prop post-fs-data.sh service.sh sepolicy.rule customize.sh system.prop; do
             [ -f "$f" ] && cp "$f" zip_root/
           done
+          # KSU WebUI / MMRL 入口
+          if [ -d webroot ]; then
+            cp -a webroot zip_root/
+          fi
           [ -d META-INF ] && cp -a META-INF zip_root/
           # 额外打一份可直接刷的 Magisk zip（单层，根目录无父目录）
           (cd zip_root && zip -r -9 ../AmberGuard-magisk.zip .)

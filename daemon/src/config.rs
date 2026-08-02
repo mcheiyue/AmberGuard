@@ -43,6 +43,9 @@ pub struct Config {
     /// daily=自动切换 / pause=仅观测
     #[serde(default = "default_mode")]
     pub mode: String,
+    /// 日志级别：error / warn / info / debug
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
 }
 
 fn default_interface() -> String {
@@ -63,6 +66,9 @@ fn default_score_switch() -> f32 {
 fn default_mode() -> String {
     "daily".into()
 }
+fn default_log_level() -> String {
+    "info".into()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -75,6 +81,7 @@ impl Default for Config {
             wpa_ctrl_path: None,
             bonds: Vec::new(),
             mode: default_mode(),
+            log_level: default_log_level(),
         }
     }
 }
@@ -86,6 +93,7 @@ pub struct ConfigPatch {
     pub score_switch_threshold: Option<f32>,
     pub upswitch_rssi_min_dbm: Option<i32>,
     pub mode: Option<String>,
+    pub log_level: Option<String>,
     pub bonds: Option<Vec<crate::band_bond::SsidBond>>,
     pub interface: Option<String>,
 }
@@ -221,6 +229,17 @@ impl Config {
                 ));
             }
             self.mode = m;
+        }
+        if let Some(lv) = p.log_level {
+            let lv = lv.to_ascii_lowercase();
+            match lv.as_str() {
+                "error" | "warn" | "info" | "debug" => self.log_level = lv,
+                _ => {
+                    return Err(ConfigError::Validate(
+                        "log_level 只能是 error/warn/info/debug".into(),
+                    ))
+                }
+            }
         }
         if let Some(b) = p.bonds {
             self.bonds = b;

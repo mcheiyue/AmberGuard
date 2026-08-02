@@ -16,6 +16,7 @@ use crate::wpa_ctrl::WpaCtrl;
 
 mod band_bond;
 mod config;
+mod file_log;
 mod health_score;
 mod power_state;
 mod scanner;
@@ -40,20 +41,21 @@ fn read_body(req: &mut tiny_http::Request) -> String {
 }
 
 fn main() {
-    env_logger::init();
-
     let config = Arc::new(Mutex::new(Config::load().expect("config load")));
     {
         let c = config.lock().unwrap();
-        log::info!("AmberGuard Phase 3 daemon started");
+        file_log::init(&c.log_level);
+        log::info!("AmberGuard Phase 4 daemon started");
+        log::info!("log file: {}", file_log::log_path_display());
         log::info!(
-            "Interface: {}, Listen: {}, mode={}, detect={}, switch={}, up_rssi={}",
+            "Interface: {}, Listen: {}, mode={}, detect={}, switch={}, up_rssi={}, log={}",
             c.interface,
             c.listen,
             c.mode,
             c.score_detect_threshold,
             c.score_switch_threshold,
-            c.upswitch_rssi_min_dbm
+            c.upswitch_rssi_min_dbm,
+            c.log_level
         );
     }
 
@@ -105,12 +107,14 @@ fn main() {
                             match c.apply_patch(patch) {
                                 Ok(()) => match c.save() {
                                     Ok(()) => {
+                                        file_log::set_level(&c.log_level);
                                         log::info!(
-                                            "config updated: detect={} switch={} up_rssi={} mode={}",
+                                            "config updated: detect={} switch={} up_rssi={} mode={} log={}",
                                             c.score_detect_threshold,
                                             c.score_switch_threshold,
                                             c.upswitch_rssi_min_dbm,
-                                            c.mode
+                                            c.mode,
+                                            c.log_level
                                         );
                                         // 同步 mode 到 snapshot
                                         if let Ok(mut s) = snapshot_http.lock() {
@@ -195,6 +199,46 @@ fn main() {
                         s.thresholds.mode = "daily".into();
                     }
                     json_resp("{\"ok\":true,\"mode\":\"daily\"}".into(), StatusCode(200))
+                }
+                (Method::Get, "/api/logs") => {
+                    // ?lines=200
+                    let lines = url
+                        .split('?')
+                        .nth(1)
+                        .and_then(|q| {
+                            q.split('&').find_map(|p| {
+                                let mut kv = p.splitn(2, '=');
+                                match (kv.next(), kv.next()) {
+                                    (Some("lines"), Some(v)) => v.parse::<usize>().ok(),
+                                    _ => None,
+                                }
+                            })
+                        })
+                        .unwrap_or(200)
+                        .clamp(20, 2000);
+                    let body = file_log::tail(lines);
+                    let json = serde_json::json!({
+                        "ok": true,
+                        "path": file_log::log_path_display(),
+                        "lines": lines,
+                        "content": body,
+                    });
+                    json_resp(json.to_string(), StatusCode(200))
+                }
+                (Method::Post, "/api/logs/clear") | (Method::Get, "/api/logs/clear") => {
+                    match file_log::clear() {
+                        Ok(()) => {
+                            log::info!("log cleared via API");
+                            json_resp(
+                                "{\"ok\":true,\"cleared\":true}".into(),
+                                StatusCode(200),
+                            )
+                        }
+                        Err(e) => json_resp(
+                            format!("{{\"ok\":false,\"error\":\"{e}\"}}"),
+                            StatusCode(500),
+                        ),
+                    }
                 }
                 (Method::Get, "/") | (Method::Get, "/index.html") => {
                     let html = include_bytes!("web/static/index.html");

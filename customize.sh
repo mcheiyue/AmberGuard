@@ -48,11 +48,11 @@ else
   ui_print "- 保留已有配置 $CONFIG"
 fi
 
+mkdir -p "$AG_DIR/log"
+
 ui_print " "
 ui_print "- 说明："
-ui_print "  · Phase 1 仅骨架：SELinux 注入 + service 启动占位"
-ui_print "  · daemon 二进制尚未编入，service.sh 会跳过启动"
-ui_print "  · 日志目录: $AG_DIR"
-ui_print "  · Web 面板预留: http://127.0.0.1:8080"
-ui_print "  · 实机请抓 avc denied 补全 sepolicy.rule"
+ui_print "  · Web 面板: http://127.0.0.1:8080 （KSU WebUI 可从模块入口打开）"
+ui_print "  · 日志: $AG_DIR/log/amberguard.log"
+ui_print "  · 配置: $CONFIG"
 ui_print " "
