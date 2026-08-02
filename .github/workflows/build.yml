@@ -58,21 +58,38 @@ jobs:
           echo "Binary size: $size bytes ($(( size / 1024 )) KB)"
           if [ "$size" -gt 1258291 ]; then echo "WARNING: over 1.2MB target"; fi
 
-      - name: Package Magisk module
-        shell: pwsh
+      # 关键：不 Compress-Archive，直接上传模块目录。
+      # GitHub Artifact 下载后解压一次，根目录就是 Magisk 模块内容（module.prop 等）。
+      # 手机上再 zip 一次刷入，或用 Magisk 从本地文件安装前自行打包。
+      - name: Stage Magisk module tree
         run: |
-          New-Item -ItemType Directory -Force -Path zip_root/system/bin | Out-Null
-          Copy-Item out/jniLibs/arm64-v8a/amberguard zip_root/system/bin/amberguard
-          @("module.prop","post-fs-data.sh","service.sh","sepolicy.rule","customize.sh","system.prop") | ForEach-Object {
-            if (Test-Path $_) { Copy-Item $_ zip_root/ }
-          }
-          if (Test-Path META-INF) { Copy-Item -Recurse META-INF zip_root/ }
-          Push-Location zip_root
-          Compress-Archive -Path * -DestinationPath "../AmberGuard-`$($env:GITHUB_SHA.substring(0,7)).zip" -Force
-          Pop-Location
+          set -e
+          rm -rf zip_root
+          mkdir -p zip_root/system/bin
+          cp out/jniLibs/arm64-v8a/amberguard zip_root/system/bin/amberguard
+          chmod 755 zip_root/system/bin/amberguard
+          for f in module.prop post-fs-data.sh service.sh sepolicy.rule customize.sh system.prop; do
+            [ -f "$f" ] && cp "$f" zip_root/
+          done
+          [ -d META-INF ] && cp -a META-INF zip_root/
+          # 额外打一份可直接刷的 Magisk zip（单层，根目录无父目录）
+          (cd zip_root && zip -r -9 ../AmberGuard-magisk.zip .)
+          ls -la zip_root/
+          ls -la AmberGuard-magisk.zip
+          unzip -l AmberGuard-magisk.zip | head -30
 
-      - name: Upload artifact
+      # 上传「模块目录」：下载 Artifact 解压一次 = 模块文件树
+      - name: Upload module tree
         uses: actions/upload-artifact@v4
         with:
-          name: AmberGuard-module
-          path: AmberGuard-*.zip
+          name: AmberGuard-module-tree
+          path: zip_root/
+          if-no-files-found: error
+
+      # 上传「可刷 zip」：下载 Artifact 解压一次 = 得到 AmberGuard-magisk.zip，再刷这个
+      - name: Upload Magisk zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmberGuard-magisk-zip
+          path: AmberGuard-magisk.zip
+          if-no-files-found: error
