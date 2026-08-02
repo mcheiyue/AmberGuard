@@ -304,9 +304,17 @@ mod platform {
         candidates.push("@wpa_wlan0".into());
         candidates.push("@wpa_wifi0".into());
 
-        // 去重保序
+        // 去重
         let mut seen = std::collections::HashSet::new();
         candidates.retain(|c| seen.insert(c.clone()));
+        // 排序：wlan 优先于 p2p（否则连到 p2p0 读不到 WiFi 状态）
+        candidates.sort_by(|a, b| {
+            let a_is_wlan = a.contains("wlan") as u8;
+            let b_is_wlan = b.contains("wlan") as u8;
+            // wlan 优先（降序：1>0 排前面）
+            b_is_wlan.cmp(&a_is_wlan)
+                .then_with(|| a.cmp(b))
+        });
         log::info!("wpa_ctrl: discover candidates: {candidates:?}");
         candidates
     }
