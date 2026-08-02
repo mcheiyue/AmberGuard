@@ -46,7 +46,28 @@
 | 完整 Web 面板 UI | 仅 API + 旧 HTML |
 | 息屏 Frozen | 未接 |
 
+## 异名双频（实机关键）
+
+路由常见：
+
+| 频段 | SSID | BSSID 例 |
+|---|---|---|
+| 5G | `MERCURY_5G_C8B5_CLONE` | `44:f9:71:3c:c8:b7` |
+| 2.4G | `MERCURY_C8B5` | `44:f9:71:3c:c8:b5` |
+
+- 羁绊匹配（配置 `[[bonds]]` / stem 启发式）**已能找到** 2.4G 对侧  
+- **SELECT 失败原因**：系统 `LIST_NETWORKS` 里只有 5G，**未保存 2.4G**  
+- **用户操作**：设置 → WLAN → 连接一次 `MERCURY_C8B5` 并保存，再测下切  
+
+`config.toml` 示例：
+
+```toml
+[[bonds]]
+ssid_5g = "MERCURY_5G_C8B5_CLONE"
+ssid_24g = "MERCURY_C8B5"
+```
+
 ## 结论
 
-**Phase 2 骨架实机可用**（观测 + 决策状态机空闲路径）。  
-**日用自动切网**待弱网/双频对侧场景或调阈值后补测一次即可收口。
+**Phase 2 骨架实机可用**（观测 + 决策 + 找到异名对侧）。  
+**完整日用切网**还需：系统里保存双频两个 SSID，然后弱网或调高 `score_switch_threshold` 触发一次 SELECT 验证。

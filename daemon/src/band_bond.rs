@@ -114,7 +114,7 @@ pub fn best_bonded_on_band(
         .cloned()
 }
 
-/// 解析 LIST_NETWORKS，返回 (id, ssid)
+/// 解析 LIST_NETWORKS，返回 (id, ssid)（兼容 tab / 多空格）
 pub fn parse_list_networks(raw: &str) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for line in raw.lines() {
@@ -122,20 +122,35 @@ pub fn parse_list_networks(raw: &str) -> Vec<(u32, String)> {
         if line.is_empty() || line.starts_with("network") || line.starts_with("Using ") {
             continue;
         }
-        // id \t ssid \t bssid \t flags
-        let mut parts = line.split('\t');
-        let Some(id_s) = parts.next() else { continue };
-        let Some(ssid) = parts.next() else { continue };
-        if let Ok(id) = id_s.parse::<u32>() {
-            out.push((id, ssid.to_string()));
+        // id \t ssid \t bssid \t flags  或空格分隔
+        let parts: Vec<&str> = if line.contains('\t') {
+            line.split('\t').collect()
+        } else {
+            line.split_whitespace().collect()
+        };
+        if parts.len() < 2 {
+            continue;
+        }
+        if let Ok(id) = parts[0].parse::<u32>() {
+            out.push((id, parts[1].to_string()));
         }
     }
     out
 }
 
 pub fn network_id_for_ssid(list_raw: &str, ssid: &str) -> Option<u32> {
-    parse_list_networks(list_raw)
-        .into_iter()
+    let list = parse_list_networks(list_raw);
+    list.iter()
         .find(|(_, s)| s == ssid)
-        .map(|(id, _)| id)
+        .map(|(id, _)| *id)
+        // 启发式：已保存网络 stem 匹配
+        .or_else(|| {
+            let want = ssid_stem(ssid);
+            list.into_iter()
+                .find(|(_, s)| {
+                    let st = ssid_stem(s);
+                    !want.is_empty() && st.eq_ignore_ascii_case(&want)
+                })
+                .map(|(id, _)| id)
+        })
 }

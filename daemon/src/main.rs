@@ -193,14 +193,15 @@ fn main() {
                                 r
                             }
                             None => {
-                                log::warn!(
-                                    "peer ssid {} not in LIST_NETWORKS — save WiFi first",
-                                    peer.ssid
+                                let msg = format!(
+                                    "请先在系统设置连接并保存 WiFi「{}」（与当前「{}」双频成对）",
+                                    peer.ssid, ssid
                                 );
-                                Err(wpa_ctrl::WpaError::Parse(format!(
-                                    "no network id for {}",
-                                    peer.ssid
-                                )))
+                                log::warn!("{msg}");
+                                if let Ok(mut snap) = snapshot.lock() {
+                                    snap.last_error = msg.clone();
+                                }
+                                Err(wpa_ctrl::WpaError::Parse(msg))
                             }
                         }
                     };
@@ -221,6 +222,9 @@ fn main() {
                             }
                             if ok {
                                 sm.finish_switch_ok();
+                                if let Ok(mut snap) = snapshot.lock() {
+                                    snap.last_error.clear();
+                                }
                                 log::info!("switch OK -> {}", peer.ssid);
                             } else {
                                 sm.enter_penalty(&bond_key);
@@ -228,7 +232,18 @@ fn main() {
                         }
                         Err(e) => {
                             log::error!("switch failed: {e}");
-                            sm.enter_penalty(&bond_key);
+                            // 配置类错误用短惩罚，避免 30s 堵死
+                            let msg = e.to_string();
+                            if msg.contains("请先在系统设置") || msg.contains("no network id") {
+                                sm.enter_penalty(&bond_key);
+                                if let Some(p) = sm.penalty.as_mut() {
+                                    p.cooldown_secs = 15;
+                                    p.until = std::time::Instant::now()
+                                        + std::time::Duration::from_secs(15);
+                                }
+                            } else {
+                                sm.enter_penalty(&bond_key);
+                            }
                         }
                     }
                 } else {

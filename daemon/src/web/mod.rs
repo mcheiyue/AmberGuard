@@ -9,6 +9,8 @@ pub struct StatusSnapshot {
     pub ssid: String,
     /// wpa 连接态或 PAUSE；sm 态也写这里便于面板观察
     pub power_state: String,
+    /// 最近一次切换/配置错误（空=无）
+    pub last_error: String,
 }
 
 impl StatusSnapshot {
@@ -20,6 +22,7 @@ impl StatusSnapshot {
             state: "DISCONNECTED".into(),
             ssid: String::new(),
             power_state: "ON".into(),
+            last_error: String::new(),
         }
     }
 }
