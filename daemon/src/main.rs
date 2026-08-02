@@ -200,6 +200,26 @@ fn main() {
                     }
                     json_resp("{\"ok\":true,\"mode\":\"daily\"}".into(), StatusCode(200))
                 }
+                (Method::Get, "/api/init-config") | (Method::Post, "/api/init-config") => {
+                    match Config::init_if_missing() {
+                        Ok(written) => {
+                            if written {
+                                // 重载配置
+                                if let Ok(mut c) = config_http.lock() {
+                                    let _ = c.reload();
+                                }
+                                log::info!("配置初始化完成");
+                                json_resp("{\"ok\":true,\"initialized\":true}".into(), StatusCode(200))
+                            } else {
+                                json_resp("{\"ok\":true,\"initialized\":false}".into(), StatusCode(200))
+                            }
+                        }
+                        Err(e) => json_resp(
+                            format!("{{\"ok\":false,\"error\":\"{e}\"}}"),
+                            StatusCode(500),
+                        ),
+                    }
+                }
                 (Method::Get, "/api/logs") => {
                     // ?lines=200
                     let lines = url

@@ -311,17 +311,41 @@ impl Config {
         Ok(cfg)
     }
 
-pub fn init_if_missing() -> Result<(), ConfigError> {
-    let path = resolve_log_path();
-    if !path.exists() {
-        let cfg = Config::default();
-        let _ = cfg.save_to(&path);
-        log::info!("已写入默认配置");
+    /// 配置不存在时写入默认（Web 引导用）
+    pub fn init_if_missing() -> Result<bool, ConfigError> {
+        let path = Self::resolve_path();
+        if path.exists() {
+            return Ok(false);
+        }
+        let cfg = Self::default();
+        cfg.save_to(&path)?;
+        log::info!("已写入默认配置 {}", path.display());
+        Ok(true)
     }
-    Ok(())
-}
-    Ok(())
-}
+
+    /// 从 config.toml 重新加载
+    pub fn reload(&mut self) -> Result<(), ConfigError> {
+        let path = Self::resolve_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        let text = fs::read_to_string(&path)?;
+        let cfg: Config = toml::from_str(&text)?;
+        self.interface = cfg.interface;
+        self.listen = cfg.listen;
+        self.upswitch_rssi_min_dbm = cfg.upswitch_rssi_min_dbm;
+        self.score_detect_threshold = cfg.score_detect_threshold;
+        self.score_switch_threshold = cfg.score_switch_threshold;
+        self.wpa_ctrl_path = cfg.wpa_ctrl_path;
+        self.bonds = cfg.bonds;
+        self.mode = cfg.mode;
+        self.log_level = cfg.log_level;
+        Ok(())
+    }
+
+    pub fn save(&self) -> Result<(), ConfigError> {
+        self.save_to(&Self::resolve_path())
+    }
 
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
         self.validate()?;
