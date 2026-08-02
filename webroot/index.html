@@ -5,53 +5,38 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>AmberGuard</title>
 <style>
-  html,body{margin:0;height:100%;background:#0a0c10;overflow:hidden;font:14px system-ui,sans-serif}
-  .box{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0a0c10;color:#8b93a7;z-index:10;text-align:center;padding:24px}
-  .spinner{width:24px;height:24px;border:2px solid #252a36;border-top-color:#f0a030;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:12px}
-  @keyframes spin{to{transform:rotate(360deg)}}
-  .btn{display:inline-block;margin-top:16px;padding:12px 20px;border-radius:10px;background:linear-gradient(135deg,#c47a18,#f0a030);color:#1a1208;text-decoration:none;font-weight:600}
-  .hint{color:#8b93a7;font-size:12px;margin-top:12px;line-height:1.5}
-  iframe{position:fixed;inset:0;width:100%;height:100%;border:0;display:none}
+html,body{margin:0;height:100%;background:#0a0c10;overflow:hidden;font:14px system-ui,sans-serif}
+#gate{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#8b93a7;text-align:center;padding:24px;z-index:2}
+.btn{display:inline-block;margin-top:14px;padding:12px 20px;border-radius:10px;background:linear-gradient(135deg,#c47a18,#f0a030);color:#1a1208;text-decoration:none;font-weight:600}
+iframe{position:fixed;inset:0;border:0;width:100%;height:100%;background:#0a0c10}
+.hint{font-size:12px;margin-top:10px;line-height:1.5;color:#5c6578}
 </style>
 </head>
 <body>
-<div class="box" id="gate">
-  <div class="spinner" id="spinner"></div>
-  <div id="msg">连接 AmberGuard 守护进程…</div>
-  <a class="btn" id="open" style="display:none" href="http://127.0.0.1:8080/">打开面板</a>
-  <p class="hint" id="hint" style="display:none">若 daemon 未启动，请确认模块已启用并重启后等待 service 拉起。</p>
+<div id="gate">
+  <div>正在打开面板…</div>
+  <a class="btn" id="open" href="http://127.0.0.1:8080/">若未自动跳转请点这里</a>
+  <p class="hint">面板由本机守护进程提供<br>http://127.0.0.1:8080/</p>
 </div>
-<iframe id="frame" title="AmberGuard"></iframe>
+<iframe id="f" title="AmberGuard" src="about:blank"></iframe>
 <script>
-(function(){
+(function () {
   var url = "http://127.0.0.1:8080/";
-  var f = document.getElementById("frame");
-  var gate = document.getElementById("gate");
-  var spinner = document.getElementById("spinner");
-  var msg = document.getElementById("msg");
-  var btn = document.getElementById("open");
-  var hint = document.getElementById("hint");
-  var maxRetry = 8, retry = 0;
-  function poll() {
-    fetch(url + "api/status", { cache: "no-store", mode: "cors" })
-      .then(function(r) {
-        if (!r.ok) throw new Error("bad");
-        gate.style.display = "none";
-        f.style.display = "block";
-        f.src = url;
-      })
-      .catch(function() {
-        retry++;
-        if (retry < maxRetry) { setTimeout(poll, 1500); }
-        else {
-          spinner.style.display = "none";
-          msg.textContent = "守护进程未响应";
-          btn.style.display = "inline-block";
-          hint.style.display = "block";
-        }
-      });
-  }
-  poll();
+  // 不做 fetch 探测：KSU WebView 对跨源 CORS 常挂起，表现为一直「连接中」
+  // 1) 优先整页跳转（多数 WebUI 宿主允许）
+  // 2) 同时塞 iframe 兜底
+  try {
+    var f = document.getElementById("f");
+    f.src = url;
+    f.onload = function () {
+      document.getElementById("gate").style.display = "none";
+      f.style.zIndex = "1";
+    };
+  } catch (e) {}
+  setTimeout(function () {
+    // 仍停在 gate：尝试 location 跳转
+    try { location.replace(url); } catch (e2) {}
+  }, 600);
 })();
 </script>
 </body>
