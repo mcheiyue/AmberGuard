@@ -9,6 +9,7 @@ use crate::band_bond::{best_bonded_on_band, network_id_for_ssid, parse_scan_resu
 use crate::config::Config;
 use crate::health_score::health_score;
 use crate::state_machine::{State, StateMachine, SwitchHint};
+use crate::station_info::{iw_station_dump, parse_iw_station, retry_rate, StationSample};
 use crate::web::StatusSnapshot;
 use crate::wpa_ctrl::WpaCtrl;
 
@@ -18,6 +19,7 @@ mod health_score;
 mod power_state;
 mod scanner;
 mod state_machine;
+mod station_info;
 mod web;
 mod wpa_ctrl;
 
@@ -78,6 +80,7 @@ fn main() {
     });
 
     let mut last_scan = Instant::now() - Duration::from_secs(60);
+    let mut prev_station = StationSample::default();
     let preferred_is_5g = true; // 日用默认偏好 5G；后续读 config
 
     loop {
@@ -94,7 +97,23 @@ fn main() {
 
         if let Some(ref st) = st {
             let rssi = st.signal_dbm.unwrap_or(-100);
-            let score = health_score(rssi, None, 0, None);
+
+            // iw station dump → retry_rate
+            let (retry_rate, tx_delta) = match iw_station_dump(&config.interface) {
+                Ok(raw) => {
+                    let cur = parse_iw_station(&raw);
+                    let rate = retry_rate(&prev_station, &cur);
+                    let delta = cur.tx_packets.saturating_sub(prev_station.tx_packets);
+                    prev_station = cur;
+                    (rate, delta)
+                }
+                Err(e) => {
+                    log::debug!("iw station dump: {e}");
+                    (None, 0)
+                }
+            };
+
+            let score = health_score(rssi, retry_rate, tx_delta, None);
             let band = match st.freq {
                 Some(f) if f > 5000 => "5",
                 Some(_) => "2.4",
