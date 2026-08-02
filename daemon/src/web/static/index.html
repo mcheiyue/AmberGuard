@@ -171,8 +171,11 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="row" style="margin-top:10px"><span class="k">SSID</span><span class="v" id="ssid">—</span></div>
         <div class="row"><span class="k">wpa</span><span class="v" id="wpa_state">—</span></div>
         <div class="row"><span class="k">状态机</span><span class="v" id="sm">—</span></div>
-        <p class="err" id="err"></p>
-      </div>
+// 在 p-status 页的 status 卡片后面加
+<div class="card">
+  <h2>配置</h2>
+  <button onclick="showInitModal()" style="width:100%;margin-top:8px">开始配置（初始化默认）</button>
+</div>
       <div class="card">
         <h2>模式</h2>
         <div class="btns">
@@ -338,13 +341,20 @@ function renderFields(api) {
     li.textContent = t;
     tips.appendChild(li);
   }
-  cfgCache = api;
-  dirty = false;
-  $('cfgMsg').textContent = '';
-  if (api.config && api.config.log_level) {
-    $('logLevel').value = api.config.log_level;
+// 在 renderFields 后面加
+function showInitModal() {
+  if (confirm("检测到配置缺失，是否初始化默认配置？\n初始化后可直接使用（可随时恢复默认）")) {
+    fetch('/api/init-config', { method: 'POST', cache: 'no-store' })
+      .then(() => {
+        loadConfig();
+        alert('配置已初始化为日用默认值');
+      });
   }
 }
+
+// 在 loadConfig 最后加
+showInitModal();
+if (!cfgCache) showInitModal();
 
 function readFormPatch() {
   if (!cfgCache) return null;

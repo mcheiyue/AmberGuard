@@ -311,9 +311,17 @@ impl Config {
         Ok(cfg)
     }
 
-    pub fn save(&self) -> Result<(), ConfigError> {
-        self.save_to(&Self::resolve_path())
+pub fn init_if_missing() -> Result<(), ConfigError> {
+    let path = resolve_log_path();
+    if !path.exists() {
+        let cfg = Config::default();
+        let _ = cfg.save_to(&path);
+        log::info!("已写入默认配置");
     }
+    Ok(())
+}
+    Ok(())
+}
 
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
         self.validate()?;
