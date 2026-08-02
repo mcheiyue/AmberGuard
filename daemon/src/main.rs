@@ -1,16 +1,17 @@
+use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use tiny_http::{Response, Server};
+use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::band_bond::{best_bonded_on_band, network_id_for_ssid, parse_scan_results};
-use crate::config::Config;
+use crate::config::{Config, ConfigPatch};
 use crate::health_score::health_score;
-use crate::state_machine::{State, StateMachine, SwitchHint};
+use crate::state_machine::{StateMachine, SwitchHint};
 use crate::station_info::{iw_station_dump, parse_iw_station, retry_rate, StationSample};
-use crate::web::StatusSnapshot;
+use crate::web::{StatusSnapshot, ThresholdsView};
 use crate::wpa_ctrl::WpaCtrl;
 
 mod band_bond;
@@ -23,13 +24,38 @@ mod station_info;
 mod web;
 mod wpa_ctrl;
 
+fn json_resp(body: String, code: StatusCode) -> Response<std::io::Cursor<Vec<u8>>> {
+    let mut r = Response::from_string(body).with_status_code(code);
+    if let Ok(h) = Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..])
+    {
+        r.add_header(h);
+    }
+    r
+}
+
+fn read_body(req: &mut tiny_http::Request) -> String {
+    let mut buf = String::new();
+    let _ = req.as_reader().read_to_string(&mut buf);
+    buf
+}
+
 fn main() {
     env_logger::init();
 
-    let config = Config::load().expect("config load");
-
-    log::info!("AmberGuard Phase 2 daemon started");
-    log::info!("Interface: {}, Listen: {}", config.interface, config.listen);
+    let config = Arc::new(Mutex::new(Config::load().expect("config load")));
+    {
+        let c = config.lock().unwrap();
+        log::info!("AmberGuard Phase 3 daemon started");
+        log::info!(
+            "Interface: {}, Listen: {}, mode={}, detect={}, switch={}, up_rssi={}",
+            c.interface,
+            c.listen,
+            c.mode,
+            c.score_detect_threshold,
+            c.score_switch_threshold,
+            c.upswitch_rssi_min_dbm
+        );
+    }
 
     let wpa = match WpaCtrl::auto_connect() {
         Ok(w) => {
@@ -45,50 +71,197 @@ fn main() {
     let snapshot = Arc::new(Mutex::new(StatusSnapshot::new()));
     let mut sm = StateMachine::new();
 
-    let addr: SocketAddr = config.listen.parse().expect("bad listen address");
+    let listen = config.lock().unwrap().listen.clone();
+    let addr: SocketAddr = listen.parse().expect("bad listen address");
     let server = Server::http(addr).expect("listen");
     log::info!("HTTP server listening on {addr}");
 
     let snapshot_http = Arc::clone(&snapshot);
+    let config_http = Arc::clone(&config);
     thread::spawn(move || {
-        for req in server.incoming_requests() {
-            match req.url() {
-                "/api/status" => {
+        for mut req in server.incoming_requests() {
+            let url = req.url().to_string();
+            let method = req.method().clone();
+            // 去掉 query
+            let path = url.split('?').next().unwrap_or(&url);
+
+            let resp = match (method, path) {
+                (Method::Get, "/api/status") => {
                     let s = snapshot_http.lock().unwrap();
                     let json = serde_json::to_string(&*s).unwrap_or_else(|_| "{}".into());
-                    let _ = req.respond(Response::from_string(json));
+                    json_resp(json, StatusCode(200))
                 }
-                "/api/mode/pause" => {
-                    // 简单：写快照 power_state；完整 mode 配置后续
+                (Method::Get, "/api/config") => {
+                    let c = config_http.lock().unwrap();
+                    let body = serde_json::to_string(&Config::api_response(&c))
+                        .unwrap_or_else(|_| "{}".into());
+                    json_resp(body, StatusCode(200))
+                }
+                (Method::Post, "/api/config") | (Method::Put, "/api/config") => {
+                    let body = read_body(&mut req);
+                    match serde_json::from_str::<ConfigPatch>(&body) {
+                        Ok(patch) => {
+                            let mut c = config_http.lock().unwrap();
+                            match c.apply_patch(patch) {
+                                Ok(()) => match c.save() {
+                                    Ok(()) => {
+                                        log::info!(
+                                            "config updated: detect={} switch={} up_rssi={} mode={}",
+                                            c.score_detect_threshold,
+                                            c.score_switch_threshold,
+                                            c.upswitch_rssi_min_dbm,
+                                            c.mode
+                                        );
+                                        // 同步 mode 到 snapshot
+                                        if let Ok(mut s) = snapshot_http.lock() {
+                                            if c.mode == "pause" {
+                                                s.power_state = "PAUSE".into();
+                                            } else if s.power_state == "PAUSE" {
+                                                s.power_state = "ON".into();
+                                            }
+                                            s.thresholds = ThresholdsView {
+                                                score_detect_threshold: c.score_detect_threshold,
+                                                score_switch_threshold: c.score_switch_threshold,
+                                                upswitch_rssi_min_dbm: c.upswitch_rssi_min_dbm,
+                                                mode: c.mode.clone(),
+                                            };
+                                            s.last_error.clear();
+                                        }
+                                        let body = serde_json::to_string(&Config::api_response(&c))
+                                            .unwrap_or_else(|_| "{}".into());
+                                        json_resp(body, StatusCode(200))
+                                    }
+                                    Err(e) => json_resp(
+                                        format!("{{\"ok\":false,\"error\":\"{e}\"}}"),
+                                        StatusCode(500),
+                                    ),
+                                },
+                                Err(e) => json_resp(
+                                    format!("{{\"ok\":false,\"error\":\"{e}\"}}"),
+                                    StatusCode(400),
+                                ),
+                            }
+                        }
+                        Err(e) => json_resp(
+                            format!("{{\"ok\":false,\"error\":\"JSON: {e}\"}}"),
+                            StatusCode(400),
+                        ),
+                    }
+                }
+                (Method::Post, "/api/config/preset/daily")
+                | (Method::Post, "/api/config/preset/stable")
+                | (Method::Post, "/api/config/preset/sensitive")
+                | (Method::Get, "/api/config/preset/daily")
+                | (Method::Get, "/api/config/preset/stable")
+                | (Method::Get, "/api/config/preset/sensitive") => {
+                    let id = path.rsplit('/').next().unwrap_or("daily");
+                    let mut c = config_http.lock().unwrap();
+                    match c.apply_preset(id).and_then(|_| c.save()) {
+                        Ok(()) => {
+                            if let Ok(mut s) = snapshot_http.lock() {
+                                s.thresholds = ThresholdsView {
+                                    score_detect_threshold: c.score_detect_threshold,
+                                    score_switch_threshold: c.score_switch_threshold,
+                                    upswitch_rssi_min_dbm: c.upswitch_rssi_min_dbm,
+                                    mode: c.mode.clone(),
+                                };
+                            }
+                            let body = serde_json::to_string(&Config::api_response(&c))
+                                .unwrap_or_else(|_| "{}".into());
+                            json_resp(body, StatusCode(200))
+                        }
+                        Err(e) => json_resp(
+                            format!("{{\"ok\":false,\"error\":\"{e}\"}}"),
+                            StatusCode(400),
+                        ),
+                    }
+                }
+                (Method::Get, "/api/mode/pause") | (Method::Post, "/api/mode/pause") => {
+                    let mut c = config_http.lock().unwrap();
+                    c.mode = "pause".into();
+                    let _ = c.save();
                     if let Ok(mut s) = snapshot_http.lock() {
                         s.power_state = "PAUSE".into();
+                        s.thresholds.mode = "pause".into();
                     }
-                    let _ = req.respond(Response::from_string("{\"ok\":true}"));
+                    json_resp("{\"ok\":true,\"mode\":\"pause\"}".into(), StatusCode(200))
                 }
-                "/api/mode/daily" => {
+                (Method::Get, "/api/mode/daily") | (Method::Post, "/api/mode/daily") => {
+                    let mut c = config_http.lock().unwrap();
+                    c.mode = "daily".into();
+                    let _ = c.save();
                     if let Ok(mut s) = snapshot_http.lock() {
                         s.power_state = "ON".into();
+                        s.thresholds.mode = "daily".into();
                     }
-                    let _ = req.respond(Response::from_string("{\"ok\":true}"));
+                    json_resp("{\"ok\":true,\"mode\":\"daily\"}".into(), StatusCode(200))
+                }
+                (Method::Get, "/") | (Method::Get, "/index.html") => {
+                    let html = include_bytes!("web/static/index.html");
+                    let mut r = Response::from_data(html.to_vec());
+                    if let Ok(h) =
+                        Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                    {
+                        r.add_header(h);
+                    }
+                    r
                 }
                 _ => {
-                    let html = include_bytes!("web/static/index.html");
-                    let _ = req.respond(Response::from_data(html.to_vec()));
+                    if path.starts_with("/api/") {
+                        json_resp(
+                            "{\"ok\":false,\"error\":\"not found\"}".into(),
+                            StatusCode(404),
+                        )
+                    } else {
+                        let html = include_bytes!("web/static/index.html");
+                        Response::from_data(html.to_vec())
+                    }
                 }
-            }
+            };
+            let _ = req.respond(resp);
         }
     });
 
     let mut last_scan = Instant::now() - Duration::from_secs(60);
     let mut prev_station = StationSample::default();
-    let preferred_is_5g = true; // 日用默认偏好 5G；后续读 config
+    let preferred_is_5g = true;
+
+    // 启动时同步 mode
+    {
+        let c = config.lock().unwrap();
+        if let Ok(mut s) = snapshot.lock() {
+            if c.mode == "pause" {
+                s.power_state = "PAUSE".into();
+            }
+            s.thresholds = ThresholdsView {
+                score_detect_threshold: c.score_detect_threshold,
+                score_switch_threshold: c.score_switch_threshold,
+                upswitch_rssi_min_dbm: c.upswitch_rssi_min_dbm,
+                mode: c.mode.clone(),
+            };
+        }
+    }
 
     loop {
-        // 暂停模式：只刷新状态，不切换
-        let paused = snapshot
-            .lock()
-            .map(|s| s.power_state == "PAUSE")
-            .unwrap_or(false);
+        let (paused, switch_th, detect_th, up_rssi, bonds, iface, mode) = {
+            let c = config.lock().unwrap();
+            (
+                c.mode == "pause",
+                c.score_switch_threshold,
+                c.score_detect_threshold,
+                c.upswitch_rssi_min_dbm,
+                c.bonds.clone(),
+                c.interface.clone(),
+                c.mode.clone(),
+            )
+        };
+
+        // 快照侧暂停标记与 config 对齐
+        if paused {
+            if let Ok(mut s) = snapshot.lock() {
+                s.power_state = "PAUSE".into();
+            }
+        }
 
         let st = {
             let w = wpa.lock().unwrap();
@@ -98,8 +271,7 @@ fn main() {
         if let Some(ref st) = st {
             let rssi = st.signal_dbm.unwrap_or(-100);
 
-            // iw station dump → retry_rate
-            let (retry_rate, tx_delta) = match iw_station_dump(&config.interface) {
+            let (retry_opt, tx_delta) = match iw_station_dump(&iface) {
                 Ok(raw) => {
                     let cur = parse_iw_station(&raw);
                     let rate = retry_rate(&prev_station, &cur);
@@ -113,7 +285,7 @@ fn main() {
                 }
             };
 
-            let score = health_score(rssi, retry_rate, tx_delta, None);
+            let score = health_score(rssi, retry_opt, tx_delta, None);
             let band = match st.freq {
                 Some(f) if f > 5000 => "5",
                 Some(_) => "2.4",
@@ -132,6 +304,12 @@ fn main() {
                 s.ssid = st.ssid.clone().unwrap_or_default();
                 s.band = band.into();
                 s.score = score;
+                s.thresholds = ThresholdsView {
+                    score_detect_threshold: detect_th,
+                    score_switch_threshold: switch_th,
+                    upswitch_rssi_min_dbm: up_rssi,
+                    mode: mode.clone(),
+                };
                 if s.power_state != "PAUSE" {
                     s.power_state = format!("{:?}", sm.state);
                 }
@@ -142,15 +320,9 @@ fn main() {
                 continue;
             }
 
-            let hint = sm.on_score(
-                score,
-                config.score_switch_threshold,
-                config.score_detect_threshold,
-                on_preferred,
-            );
+            let hint = sm.on_score(score, switch_th, detect_th, on_preferred);
 
             if hint != SwitchHint::None {
-                // 需要较新的扫描结果
                 if last_scan.elapsed() > Duration::from_secs(15) {
                     let _ = wpa.lock().unwrap().command("SCAN");
                     thread::sleep(Duration::from_secs(2));
@@ -168,15 +340,11 @@ fn main() {
 
                 let target = match hint {
                     SwitchHint::Downswitch => {
-                        best_bonded_on_band(&scans, &ssid, false, -80, &config.bonds)
+                        best_bonded_on_band(&scans, &ssid, false, -80, &bonds)
                     }
-                    SwitchHint::Upswitch => best_bonded_on_band(
-                        &scans,
-                        &ssid,
-                        true,
-                        config.upswitch_rssi_min_dbm,
-                        &config.bonds,
-                    ),
+                    SwitchHint::Upswitch => {
+                        best_bonded_on_band(&scans, &ssid, true, up_rssi, &bonds)
+                    }
                     SwitchHint::None => None,
                 };
 
@@ -200,12 +368,10 @@ fn main() {
                     let switch_res = if same_ssid {
                         wpa.lock().unwrap().roam(&peer.bssid)
                     } else {
-                        // 异 SSID：需已保存的 network id
                         let list = wpa.lock().unwrap().list_networks().unwrap_or_default();
                         match network_id_for_ssid(&list, &peer.ssid) {
                             Some(nid) => {
                                 let w = wpa.lock().unwrap();
-                                // 锁定 BSSID 后 SELECT（失败不阻塞清锁——以实机为准）
                                 let _ = w.set_network_bssid(nid, &peer.bssid);
                                 let r = w.select_network(nid);
                                 let _ = w.set_network_bssid(nid, "\"\"");
@@ -251,17 +417,13 @@ fn main() {
                         }
                         Err(e) => {
                             log::error!("switch failed: {e}");
-                            // 配置类错误用短惩罚，避免 30s 堵死
                             let msg = e.to_string();
+                            sm.enter_penalty(&bond_key);
                             if msg.contains("请先在系统设置") || msg.contains("no network id") {
-                                sm.enter_penalty(&bond_key);
                                 if let Some(p) = sm.penalty.as_mut() {
                                     p.cooldown_secs = 15;
-                                    p.until = std::time::Instant::now()
-                                        + std::time::Duration::from_secs(15);
+                                    p.until = Instant::now() + Duration::from_secs(15);
                                 }
-                            } else {
-                                sm.enter_penalty(&bond_key);
                             }
                         }
                     }
@@ -269,7 +431,7 @@ fn main() {
                     log::info!(
                         "switch {:?}: no bonded peer (ssid={ssid}, bonds={})",
                         hint,
-                        config.bonds.len()
+                        bonds.len()
                     );
                     sm.finish_switch_ok();
                 }
@@ -284,7 +446,6 @@ fn offline_loop() -> ! {
     let snapshot = Arc::new(Mutex::new(StatusSnapshot::new()));
     let snapshot2 = Arc::clone(&snapshot);
     let addr: SocketAddr = "127.0.0.1:8080".parse().expect("addr");
-    // 若端口占用则空转
     if let Ok(server) = Server::http(addr) {
         thread::spawn(move || {
             for req in server.incoming_requests() {

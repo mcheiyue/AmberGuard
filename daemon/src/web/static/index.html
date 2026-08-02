@@ -14,7 +14,7 @@ h1{margin:0;font-size:18px;font-weight:600}
 .badge.ok{background:#14301f;color:var(--ok)}
 .badge.bad{background:#3a1515;color:var(--bad)}
 .badge.warn{background:#3a3010;color:var(--warn)}
-main{padding:16px 20px;display:grid;gap:12px;max-width:720px}
+main{padding:16px 20px;display:grid;gap:12px;max-width:820px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
 .card h2{margin:0 0 10px;font-size:13px;color:var(--muted);font-weight:500}
 .row{display:flex;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid var(--line)}
@@ -23,18 +23,32 @@ main{padding:16px 20px;display:grid;gap:12px;max-width:720px}
 .v{font-variant-numeric:tabular-nums;text-align:right;word-break:break-all}
 .note{color:var(--muted);font-size:12px;margin-top:8px}
 .err{color:var(--bad);font-size:13px;margin-top:8px;min-height:1.2em}
+.okmsg{color:var(--ok);font-size:13px;margin-top:8px;min-height:1.2em}
 .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 button{background:var(--line);color:var(--fg);border:0;border-radius:8px;padding:8px 14px;font:inherit;cursor:pointer}
 button.primary{background:#1a3a5c;color:var(--acc)}
 button:active{opacity:.85}
-pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.45 ui-monospace,Consolas,monospace;color:var(--muted);max-height:200px;overflow:auto}
+button:disabled{opacity:.45;cursor:not-allowed}
 .bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:8px}
 .bar>i{display:block;height:100%;background:var(--ok);width:0%;transition:width .3s}
+.field{margin:14px 0;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.field:last-of-type{border-bottom:0}
+.field label{display:block;font-weight:600;margin-bottom:4px}
+.field .meaning{color:var(--fg);font-size:13px;margin:0 0 6px}
+.field .guide{color:var(--muted);font-size:12px;margin:0 0 8px}
+.field .ctrl{display:flex;align-items:center;gap:10px}
+.field input[type=range]{flex:1}
+.field .val{min-width:4.5em;text-align:right;font-variant-numeric:tabular-nums;color:var(--acc)}
+.def{font-size:11px;color:var(--muted)}
+.tips{margin:0;padding-left:18px;color:var(--muted);font-size:12px}
+.tips li{margin:4px 0}
+.preset{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;min-width:140px}
+.preset small{color:var(--muted);font-size:11px;font-weight:400}
 </style>
 </head>
 <body>
 <header>
-  <h1>AmberGuard <span style="color:var(--muted);font-weight:400;font-size:13px">日用双频守护</span></h1>
+  <h1>AmberGuard <span style="color:var(--muted);font-weight:400;font-size:13px">日用双频守护 · Phase 3</span></h1>
   <span id="conn" class="badge">连接中…</span>
 </header>
 <main>
@@ -42,34 +56,169 @@ pre{margin:0;white-space:pre-wrap;word-break:break-all;font:12px/1.45 ui-monospa
     <h2>当前连接</h2>
     <div class="row"><span class="k">SSID</span><span class="v" id="ssid">—</span></div>
     <div class="row"><span class="k">频段</span><span class="v" id="band">—</span></div>
-    <div class="row"><span class="k">RSSI</span><span class="v" id="rssi">—</span></div>
+    <div class="row"><span class="k">RSSI（接收信号强度）</span><span class="v" id="rssi">—</span></div>
     <div class="row"><span class="k">wpa 状态</span><span class="v" id="wpa_state">—</span></div>
     <div class="bar"><i id="hbar"></i></div>
-    <p class="note">健康度 <span id="health">—</span> · 状态机 <span id="sm">—</span></p>
+    <p class="note">健康度 <span id="health">—</span>（0–100，越高越好）· 状态机 <span id="sm">—</span></p>
     <p class="err" id="err"></p>
   </section>
+
   <section class="card">
     <h2>模式</h2>
     <div class="btns">
       <button class="primary" onclick="mode('daily')">日用（自动切换）</button>
       <button onclick="mode('pause')">暂停守护</button>
     </div>
-    <p class="note">异名双频需在系统设置里<strong>分别保存</strong> 5G 与 2.4G（如 MERCURY_C8B5）。未保存时无法 SELECT 下切。</p>
+    <p class="note">暂停后只刷新状态、不切网。异名双频须在系统设置<strong>分别保存</strong> 5G 与 2.4G。</p>
   </section>
+
   <section class="card">
-    <h2>原始 JSON</h2>
-    <pre id="raw">等待…</pre>
-    <p class="note">2s 轮询 · 127.0.0.1:8080</p>
+    <h2>阈值（热更新 · 立即生效并保存）</h2>
+    <p class="note" style="margin-top:0">先选预设再微调。术语见每项「含义」与「怎么调」。</p>
+    <div class="btns" id="presets"></div>
+    <div id="fields"></div>
+    <div class="btns">
+      <button class="primary" id="btnSave" onclick="saveConfig()">保存阈值</button>
+      <button onclick="resetDefaults()">恢复默认（日用）</button>
+    </div>
+    <p class="okmsg" id="cfgMsg"></p>
+    <p class="err" id="cfgErr"></p>
+  </section>
+
+  <section class="card">
+    <h2>上手说明</h2>
+    <ul class="tips" id="tips"></ul>
   </section>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
+let cfgCache = null;
+let dirty = false;
+
+function markDirty() {
+  dirty = true;
+  $('cfgMsg').textContent = '有未保存的修改';
+  $('cfgErr').textContent = '';
+}
+
 async function mode(m) {
   try {
-    await fetch('/api/mode/' + m, { method: 'GET', cache: 'no-store' });
+    await fetch('/api/mode/' + m, { method: 'POST', cache: 'no-store' });
     tick();
+    loadConfig();
   } catch (e) { $('err').textContent = e.message; }
 }
+
+function renderFields(api) {
+  const box = $('fields');
+  box.innerHTML = '';
+  const c = api.config;
+  const d = api.defaults;
+  for (const f of api.fields) {
+    const cur = c[f.key];
+    const def = d[f.key];
+    const div = document.createElement('div');
+    div.className = 'field';
+    div.innerHTML =
+      '<label>' + f.label + ' <span class="def">默认 ' + def + (f.unit ? ' · ' + f.unit : '') + '</span></label>' +
+      '<p class="meaning"><strong>含义：</strong>' + f.meaning + '</p>' +
+      '<p class="guide"><strong>怎么调：</strong>' + f.guide + '</p>' +
+      '<div class="ctrl">' +
+      '<input type="range" id="f_' + f.key + '" min="' + f.min + '" max="' + f.max + '" step="' + f.step + '" value="' + cur + '">' +
+      '<span class="val" id="v_' + f.key + '">' + cur + '</span>' +
+      '</div>';
+    box.appendChild(div);
+    const inp = $('f_' + f.key);
+    const val = $('v_' + f.key);
+    inp.addEventListener('input', () => {
+      val.textContent = inp.value;
+      markDirty();
+    });
+  }
+  const pb = $('presets');
+  pb.innerHTML = '';
+  for (const p of api.presets) {
+    const b = document.createElement('button');
+    b.className = 'preset';
+    b.innerHTML = '<strong>' + p.label + '</strong><small>' + p.desc + '</small>';
+    b.onclick = () => applyPreset(p.id);
+    pb.appendChild(b);
+  }
+  const tips = $('tips');
+  tips.innerHTML = '';
+  for (const t of api.tips) {
+    const li = document.createElement('li');
+    li.textContent = t;
+    tips.appendChild(li);
+  }
+  cfgCache = api;
+  dirty = false;
+  $('cfgMsg').textContent = '';
+}
+
+function readFormPatch() {
+  if (!cfgCache) return null;
+  const patch = {};
+  for (const f of cfgCache.fields) {
+    const el = $('f_' + f.key);
+    if (!el) continue;
+    const v = f.key.includes('rssi') ? parseInt(el.value, 10) : parseFloat(el.value);
+    patch[f.key] = v;
+  }
+  return patch;
+}
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config', { cache: 'no-store' });
+    const j = await r.json();
+    renderFields(j);
+  } catch (e) {
+    $('cfgErr').textContent = '加载配置失败: ' + e.message;
+  }
+}
+
+async function saveConfig() {
+  const patch = readFormPatch();
+  if (!patch) return;
+  $('cfgErr').textContent = '';
+  $('cfgMsg').textContent = '保存中…';
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+      cache: 'no-store'
+    });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    renderFields(j);
+    $('cfgMsg').textContent = '已保存并立即生效（写入 config.toml）';
+    tick();
+  } catch (e) {
+    $('cfgMsg').textContent = '';
+    $('cfgErr').textContent = e.message;
+  }
+}
+
+async function applyPreset(id) {
+  $('cfgErr').textContent = '';
+  try {
+    const r = await fetch('/api/config/preset/' + id, { method: 'POST', cache: 'no-store' });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    renderFields(j);
+    $('cfgMsg').textContent = '已应用预设「' + id + '」并保存';
+    tick();
+  } catch (e) {
+    $('cfgErr').textContent = e.message;
+  }
+}
+
+async function resetDefaults() {
+  await applyPreset('daily');
+}
+
 async function tick() {
   try {
     const r = await fetch('/api/status', { cache: 'no-store' });
@@ -87,17 +236,30 @@ async function tick() {
     $('hbar').style.background = sc < 30 ? 'var(--bad)' : sc < 70 ? 'var(--warn)' : 'var(--ok)';
     $('sm').textContent = j.power_state || '—';
     $('err').textContent = j.last_error || '';
-    if (j.power_state === 'PAUSE') {
+    if (j.power_state === 'PAUSE' || (j.thresholds && j.thresholds.mode === 'pause')) {
       $('conn').textContent = '已暂停';
       $('conn').className = 'badge warn';
     }
-    $('raw').textContent = JSON.stringify(j, null, 2);
+    // 未脏时用 status 里的阈值刷新滑条显示（热更新后他端改了也能跟）
+    if (!dirty && j.thresholds && cfgCache) {
+      const t = j.thresholds;
+      for (const f of cfgCache.fields) {
+        if (t[f.key] == null) continue;
+        const inp = $('f_' + f.key);
+        const val = $('v_' + f.key);
+        if (inp && document.activeElement !== inp) {
+          inp.value = t[f.key];
+          if (val) val.textContent = t[f.key];
+        }
+      }
+    }
   } catch (e) {
     $('conn').textContent = '离线';
     $('conn').className = 'badge bad';
-    $('raw').textContent = '拉取失败: ' + e.message;
   }
 }
+
+loadConfig();
 tick();
 setInterval(tick, 2000);
 </script>

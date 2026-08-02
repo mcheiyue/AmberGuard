@@ -1,14 +1,12 @@
 //! 配置读写：/data/adb/amberguard/config.toml
-//! 宿主开发时回退到工作目录下的 amberguard_config.toml
+//! Phase 3：Web 可调阈值 + 标准化默认与字段元数据
 
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-/// Android 正式路径
 pub const ANDROID_CONFIG_PATH: &str = "/data/adb/amberguard/config.toml";
-/// 宿主开发回退路径（相对 cwd）
 const DEV_CONFIG_PATH: &str = "amberguard_config.toml";
 
 #[derive(Debug, Error)]
@@ -19,33 +17,30 @@ pub enum ConfigError {
     TomlDe(#[from] toml::de::Error),
     #[error("TOML 序列化: {0}")]
     TomlSer(#[from] toml::ser::Error),
+    #[error("校验: {0}")]
+    Validate(String),
 }
 
-/// 守护进程配置（Phase 1 最小字段）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// 网卡名，默认 wlan0
     #[serde(default = "default_interface")]
     pub interface: String,
-    /// HTTP 监听，仅本机
     #[serde(default = "default_listen")]
     pub listen: String,
-    /// 上切对侧 RSSI 下限（dBm）
+    /// 上切对侧 RSSI 下限（dBm）。数值越大=要求对侧信号越强。默认 -65。
     #[serde(default = "default_upswitch_rssi")]
     pub upswitch_rssi_min_dbm: i32,
-    /// 进入梯度检测阈值
+    /// 梯度检测阈值（健康度 0–100）。低于此值进入观察/扫描，尚未切换。默认 70。
     #[serde(default = "default_score_detect")]
     pub score_detect_threshold: f32,
-    /// 触发切换阈值
+    /// 切换阈值（健康度 0–100）。低于此值且防抖通过后执行下切。须小于检测阈值。默认 30。
     #[serde(default = "default_score_switch")]
     pub score_switch_threshold: f32,
-    /// 可选：强制 wpa ctrl 路径（覆盖自动探测）
     #[serde(default)]
     pub wpa_ctrl_path: Option<String>,
-    /// 异名双频羁绊（如 5G SSID 与 2.4G SSID 不同）
     #[serde(default)]
     pub bonds: Vec<crate::band_bond::SsidBond>,
-    /// 工作模式：daily / pause
+    /// daily=自动切换 / pause=仅观测
     #[serde(default = "default_mode")]
     pub mode: String,
 }
@@ -84,8 +79,190 @@ impl Default for Config {
     }
 }
 
+/// Web 部分更新（只改传入字段）
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ConfigPatch {
+    pub score_detect_threshold: Option<f32>,
+    pub score_switch_threshold: Option<f32>,
+    pub upswitch_rssi_min_dbm: Option<i32>,
+    pub mode: Option<String>,
+    pub bonds: Option<Vec<crate::band_bond::SsidBond>>,
+    pub interface: Option<String>,
+}
+
+/// 字段说明（给面板引导用）
+#[derive(Debug, Serialize)]
+pub struct FieldMeta {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub unit: &'static str,
+    pub default: f64,
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+    /// 一句话：是什么
+    pub meaning: &'static str,
+    /// 调大/调小会怎样 + 日用建议
+    pub guide: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConfigApiResponse {
+    pub config: Config,
+    pub defaults: Config,
+    pub fields: Vec<FieldMeta>,
+    pub presets: Vec<PresetMeta>,
+    pub tips: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PresetMeta {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub desc: &'static str,
+    pub score_detect_threshold: f32,
+    pub score_switch_threshold: f32,
+    pub upswitch_rssi_min_dbm: i32,
+}
+
 impl Config {
-    /// 解析实际读写路径：Android 路径可写则用之，否则开发回退
+    pub fn field_meta() -> Vec<FieldMeta> {
+        vec![
+            FieldMeta {
+                key: "score_detect_threshold",
+                label: "梯度检测阈值",
+                unit: "健康度 0–100",
+                default: 70.0,
+                min: 40.0,
+                max: 95.0,
+                step: 1.0,
+                meaning: "健康度跌破此值时，进入「观察/更积极扫描」阶段，但还不会切网。",
+                guide: "调高=更早开始留意信号变差（偏敏感）；调低=更迟才进入观察（更稳、少折腾）。日用建议 65–75，默认 70。",
+            },
+            FieldMeta {
+                key: "score_switch_threshold",
+                label: "下切触发阈值",
+                unit: "健康度 0–100",
+                default: 30.0,
+                min: 10.0,
+                max: 80.0,
+                step: 1.0,
+                meaning: "健康度持续低于此值，且通过防抖确认后，才会从首选频段（通常 5G）切到更稳的 2.4G。",
+                guide: "调高=更早下切 2.4G（卡顿少、切网多）；调低=更能扛信号差（切网少、可能先卡一阵）。必须小于「梯度检测阈值」。日用建议 25–40，默认 30。",
+            },
+            FieldMeta {
+                key: "upswitch_rssi_min_dbm",
+                label: "上切对侧 RSSI 下限",
+                unit: "dBm（负数）",
+                default: -65.0,
+                min: -85.0,
+                max: -40.0,
+                step: 1.0,
+                meaning: "当前在 2.4G 时，扫描到的 5G 对侧信号至少要达到此强度才允许切回 5G。RSSI 是接收信号强度，越接近 0 越好（如 -40 优于 -70）。",
+                guide: "调高（如 -55）= 要求 5G 更强才切回（更稳、更久停在 2.4G）；调低（如 -75）= 5G 稍弱也切回（更爱 5G）。日用建议 -70～-60，默认 -65。",
+            },
+        ]
+    }
+
+    pub fn presets() -> Vec<PresetMeta> {
+        vec![
+            PresetMeta {
+                id: "daily",
+                label: "日用（默认）",
+                desc: "视频/网页：下切偏稳、上切更稳。推荐起步。",
+                score_detect_threshold: 70.0,
+                score_switch_threshold: 30.0,
+                upswitch_rssi_min_dbm: -65,
+            },
+            PresetMeta {
+                id: "stable",
+                label: "更稳（少切网）",
+                desc: "能扛再切：检测与下切都更靠后，适合嫌切换打断的人。",
+                score_detect_threshold: 60.0,
+                score_switch_threshold: 22.0,
+                upswitch_rssi_min_dbm: -58,
+            },
+            PresetMeta {
+                id: "sensitive",
+                label: "更敏（早切 2.4G）",
+                desc: "信号一差就准备下切，卡顿少、切网可能略多。",
+                score_detect_threshold: 78.0,
+                score_switch_threshold: 42.0,
+                upswitch_rssi_min_dbm: -70,
+            },
+        ]
+    }
+
+    pub fn tips() -> Vec<&'static str> {
+        vec![
+            "健康度：综合 RSSI 与重传率的 0–100 分，越高越好。不是单纯信号格。",
+            "下切：5G→2.4G，优先保流畅；上切：2.4G→5G，要等对侧够强且防抖通过。",
+            "异名双频（如 XXX_5G 与 XXX）须在系统 WiFi 里分别连接并保存，否则无法 SELECT 切网。",
+            "改阈值后立即生效并写入 /data/adb/amberguard/config.toml；可用「恢复默认」一键还原。",
+            "防抖时间固定为日用策略（下切约 4s、上切约 7s），本页不开放，避免误调导致来回跳。",
+        ]
+    }
+
+    pub fn apply_patch(&mut self, p: ConfigPatch) -> Result<(), ConfigError> {
+        if let Some(v) = p.score_detect_threshold {
+            self.score_detect_threshold = v.clamp(40.0, 95.0);
+        }
+        if let Some(v) = p.score_switch_threshold {
+            self.score_switch_threshold = v.clamp(10.0, 80.0);
+        }
+        if let Some(v) = p.upswitch_rssi_min_dbm {
+            self.upswitch_rssi_min_dbm = v.clamp(-85, -40);
+        }
+        if let Some(m) = p.mode {
+            let m = m.to_lowercase();
+            if m != "daily" && m != "pause" {
+                return Err(ConfigError::Validate(
+                    "mode 只能是 daily 或 pause".into(),
+                ));
+            }
+            self.mode = m;
+        }
+        if let Some(b) = p.bonds {
+            self.bonds = b;
+        }
+        if let Some(iface) = p.interface {
+            if !iface.is_empty() {
+                self.interface = iface;
+            }
+        }
+        self.validate()
+    }
+
+    pub fn apply_preset(&mut self, id: &str) -> Result<(), ConfigError> {
+        let Some(p) = Self::presets().into_iter().find(|x| x.id == id) else {
+            return Err(ConfigError::Validate(format!("未知预设: {id}")));
+        };
+        self.score_detect_threshold = p.score_detect_threshold;
+        self.score_switch_threshold = p.score_switch_threshold;
+        self.upswitch_rssi_min_dbm = p.upswitch_rssi_min_dbm;
+        self.validate()
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.score_switch_threshold >= self.score_detect_threshold {
+            return Err(ConfigError::Validate(format!(
+                "下切阈值({:.0}) 必须小于 梯度检测阈值({:.0})",
+                self.score_switch_threshold, self.score_detect_threshold
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn api_response(cfg: &Config) -> ConfigApiResponse {
+        ConfigApiResponse {
+            config: cfg.clone(),
+            defaults: Config::default(),
+            fields: Self::field_meta(),
+            presets: Self::presets(),
+            tips: Self::tips(),
+        }
+    }
+
     pub fn resolve_path() -> PathBuf {
         let android = Path::new(ANDROID_CONFIG_PATH);
         if android.parent().is_some_and(|p| p.is_dir()) || android.exists() {
@@ -94,12 +271,10 @@ impl Config {
         PathBuf::from(DEV_CONFIG_PATH)
     }
 
-    /// 加载配置；文件不存在则写默认并返回
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::resolve_path();
         if !path.exists() {
             let cfg = Self::default();
-            // 父目录可能不存在（如 /data/adb 未挂载）——写失败仅打日志由调用方处理
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
@@ -109,7 +284,11 @@ impl Config {
             return Ok(cfg);
         }
         let text = fs::read_to_string(&path)?;
-        let cfg: Config = toml::from_str(&text)?;
+        let mut cfg: Config = toml::from_str(&text)?;
+        let _ = cfg.validate(); // 旧文件若不合理，仍加载但日志
+        if let Err(e) = cfg.validate() {
+            log::warn!("配置校验警告: {e}（将尽量运行）");
+        }
         Ok(cfg)
     }
 
@@ -118,6 +297,7 @@ impl Config {
     }
 
     pub fn save_to(&self, path: &Path) -> Result<(), ConfigError> {
+        self.validate()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
