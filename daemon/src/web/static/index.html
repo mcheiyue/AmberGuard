@@ -171,7 +171,9 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="row" style="margin-top:10px"><span class="k">SSID</span><span class="v" id="ssid">—</span></div>
         <div class="row"><span class="k">wpa</span><span class="v" id="wpa_state">—</span></div>
         <div class="row"><span class="k">状态机</span><span class="v" id="sm">—</span></div>
-<div class="card" id="initCard">
+        <p class="err" id="err"></p>
+      </div>
+      <div class="card" id="initCard">
         <h2>开始配置</h2>
         <p class="note" style="margin-top:0">首次使用 AmberGuard？点此初始化默认配置，即可直接使用。</p>
         <button onclick="showInitModal()" class="primary" style="width:100%">初始化配置（日用默认）</button>
@@ -341,6 +343,14 @@ function renderFields(api) {
     li.textContent = t;
     tips.appendChild(li);
   }
+  cfgCache = api;
+  dirty = false;
+  $('cfgMsg').textContent = '';
+  if (api.config && api.config.log_level) {
+    $('logLevel').value = api.config.log_level;
+  }
+}
+
 function showInitModal() {
   if (confirm("初始化默认配置：\n• 阈值设为日用标准\n• 日志级别为 info\n• 模式为自动切换\n\n配置已存在于 /data/adb/amberguard/config.toml\n确认执行？")) {
     const btn = document.querySelector('#initCard .primary');
