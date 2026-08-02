@@ -438,4 +438,52 @@ impl WpaCtrl {
     pub fn is_connected(&self) -> bool {
         self.connected
     }
+
+    /// 期望回复含 OK（ROAM/SELECT 等）
+    fn expect_ok(&self, cmd: &str) -> Result<(), WpaError> {
+        let rep = self.command(cmd)?;
+        if rep.contains("OK") || rep.trim() == "OK" {
+            Ok(())
+        } else if rep.contains("FAIL") {
+            Err(WpaError::Parse(format!("{cmd} => {rep}")))
+        } else {
+            // 部分实现只回空/其它；仍返回原文错误便于排查
+            Err(WpaError::Parse(format!("{cmd} unexpected: {rep}")))
+        }
+    }
+
+    pub fn ping(&self) -> Result<bool, WpaError> {
+        let r = self.command("PING")?;
+        Ok(r.contains("PONG"))
+    }
+
+    pub fn roam(&self, bssid: &str) -> Result<(), WpaError> {
+        self.expect_ok(&format!("ROAM {bssid}"))
+    }
+
+    pub fn list_networks(&self) -> Result<String, WpaError> {
+        self.command("LIST_NETWORKS")
+    }
+
+    pub fn scan_results(&self) -> Result<String, WpaError> {
+        self.command("SCAN_RESULTS")
+    }
+
+    pub fn select_network(&self, id: u32) -> Result<(), WpaError> {
+        self.expect_ok(&format!("SELECT_NETWORK {id}"))
+    }
+
+    pub fn set_network_bssid(&self, id: u32, bssid: &str) -> Result<(), WpaError> {
+        // bssid "" 清除锁定
+        self.expect_ok(&format!("SET_NETWORK {id} bssid {bssid}"))
+    }
+
+    pub fn disable_network(&self, id: u32) -> Result<(), WpaError> {
+        self.expect_ok(&format!("DISABLE_NETWORK {id}"))
+    }
+
+    pub fn enable_network(&self, id: u32) -> Result<(), WpaError> {
+        // wpa 用 disabled 0，无 enabled=1
+        self.expect_ok(&format!("SET_NETWORK {id} disabled 0"))
+    }
 }

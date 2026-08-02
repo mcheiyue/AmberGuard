@@ -92,7 +92,7 @@ daemon strip 后约 **1.33–1.36MB**（略超 800KB 目标，含 tiny_http/serd
 | ② ROAM 同 SSID 行为 | ✅ OK，~0.55s 回 COMPLETED |
 | ③ 健康度数据源至少一条 | ✅ SIGNAL_POLL RSSI；iw 有 tx_retries |
 | ④ 失败缩 scope | 不需要 |
-| ⑤ 电源入口 | ⚠️ 未做完整 5min 息屏；daemon 亮屏常驻已确认，息屏推后续补测 |
+| ⑤ 电源入口 | ⚠️ 未做完整 5min 息屏自动化；亮屏下 daemon 长驻 + API 正常已确认。息屏/Doze 推 Phase 2 补测 |
 
 ## 9. Phase 2 范围建议（**全开最小日用**）
 

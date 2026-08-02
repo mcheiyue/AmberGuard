@@ -7,6 +7,7 @@ pub struct StatusSnapshot {
     pub band: String,
     pub state: String,
     pub ssid: String,
+    /// wpa 连接态或 PAUSE；sm 态也写这里便于面板观察
     pub power_state: String,
 }
 

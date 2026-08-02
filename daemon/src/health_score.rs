@@ -1,11 +1,13 @@
-use std::time::Instant;
-
-/// Phase 1 stub - 完整健康度逻辑在 Phase 2
-pub fn health_score(rssi: i32, retry_rate: Option<f32>, _tx_delta: u64, rtt_ms: Option<u32>) -> f32 {
+/// 健康度 0–100。retry_rate: 0.0–1.0（Δtx_retries/Δtx_packets）；无流量时传 None → retry 中位 50。
+/// RTT 推 Phase 2.5，当前忽略。
+pub fn health_score(rssi: i32, retry_rate: Option<f32>, tx_delta: u64, _rtt_ms: Option<u32>) -> f32 {
     let rssi_score = ((rssi + 90) as f32 / 50.0 * 100.0).clamp(0.0, 100.0);
-    let retry_score = retry_rate.map_or(50.0, |r| (100.0 - r * 100.0).max(0.0));
-    match rtt_ms {
-        Some(_) => rssi_score * 0.4 + retry_score * 0.4 + 20.0 * 0.2,
-        None => rssi_score * 0.5 + retry_score * 0.5,
-    }
+    // 无流量时 tx_retries 不增长 → 假健康，retry 置中
+    const MIN_TX: u64 = 8;
+    let retry_score = match retry_rate {
+        Some(rate) if tx_delta > MIN_TX => (100.0 - rate * 100.0).max(0.0),
+        _ => 50.0,
+    };
+    // Phase 2 先 RSSI+Retry，无 RTT
+    rssi_score * 0.5 + retry_score * 0.5
 }
