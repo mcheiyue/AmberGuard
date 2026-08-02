@@ -59,19 +59,18 @@ impl WpaStatus {
 
 #[cfg(unix)]
 mod platform {
-    use std::os::unix::io::RawFd;
+    use std::os::unix::io::OwnedFd;
     use std::time::Duration;
 
-    use nix::sys::socket::{socket, connect, SockaddrUnix, SockFlag, SockType, SockProtocol};
-    use nix::unistd::{read, write, close};
-    use nix::errno::Errno;
+    use nix::sys::socket::{socket, connect, UnixAddr, SockFlag, SockType};
+    use nix::unistd::{read, write};
 
     use super::*;
 
     const BUF_SIZE: usize = 4096;
 
     pub struct WpaCtrlImpl {
-        fd: Option<RawFd>,
+        fd: Option<OwnedFd>,
         ctrl_path: String,
     }
 
@@ -85,20 +84,18 @@ mod platform {
                 nix::sys::socket::AddressFamily::Unix,
                 SockType::SeqPacket,
                 SockFlag::empty(),
-                SockProtocol::default(),
+                None,
             ).map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
 
             let sock_addr = if self.ctrl_path.starts_with('@') {
-                // abstract socket: replace @ with \0
-                let abs = format!("\0{}", &self.ctrl_path[1..]);
-                SockaddrUnix::new(&abs)
-                    .map_err(|_| WpaError::Parse("abstract socket name too long".into()))?
+                UnixAddr::new_abstract(self.ctrl_path[1..].as_bytes())
+                    .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?
             } else {
-                SockaddrUnix::new(&self.ctrl_path)
-                    .map_err(|_| WpaError::Parse("socket path too long".into()))?
+                UnixAddr::new(self.ctrl_path.as_bytes())
+                    .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?
             };
 
-            connect(fd, &sock_addr)
+            connect(&fd, &sock_addr)
                 .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
 
             self.fd = Some(fd);
@@ -107,19 +104,21 @@ mod platform {
         }
 
         pub fn send_command(&self, cmd: &str) -> Result<(), WpaError> {
-            let fd = self.fd.ok_or(WpaError::NotConnected)?;
+            let fd = self.fd.as_ref().ok_or(WpaError::NotConnected)?;
             write(fd, cmd.as_bytes())
                 .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
             Ok(())
         }
 
         pub fn receive_reply(&self, timeout: Duration) -> Result<String, WpaError> {
-            let fd = self.fd.ok_or(WpaError::NotConnected)?;
+            let fd = self.fd.as_ref().ok_or(WpaError::NotConnected)?;
             let mut buf = vec![0u8; BUF_SIZE];
-            // 非阻塞 + poll 实现超时
+            let poll_timeout = nix::poll::PollTimeout::from(
+                timeout.as_millis().try_into().unwrap_or(u16::MAX)
+            );
             nix::poll::poll(
                 &mut [nix::poll::PollFd::new(fd, nix::poll::PollFlags::POLLIN)],
-                timeout.as_millis() as i32,
+                poll_timeout,
             ).map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
 
             let n = read(fd, &mut buf)
@@ -134,27 +133,15 @@ mod platform {
             self.receive_reply(timeout)
         }
 
-        /// STATUS 快捷方法
         pub fn status(&self) -> Result<WpaStatus, WpaError> {
             let raw = self.command("STATUS", Duration::from_secs(3))?;
             Ok(WpaStatus::parse(&raw))
         }
     }
 
-    impl Drop for WpaCtrlImpl {
-        fn drop(&mut self) {
-            if let Some(fd) = self.fd {
-                let _ = close(fd);
-            }
-        }
-    }
-
     pub fn discover() -> Vec<String> {
         let mut candidates = Vec::new();
-
-        // abstract namespace
         candidates.push("@wpa_wlan0".into());
-        // 常见路径
         for dir in &[
             "/data/misc/wifi/sockets",
             "/data/vendor/wifi/sockets",
