@@ -134,6 +134,7 @@ impl StateMachine {
     }
 
     /// 根据健康度推进；返回是否应尝试下切 / 上切
+    /// 下切仅当在首选频段（5G→2.4G），上切仅当在非首选频段（2.4G→5G）
     pub fn on_score(
         &mut self,
         score: f32,
@@ -150,7 +151,8 @@ impl StateMachine {
             return SwitchHint::None;
         }
 
-        if score < switch_th {
+        if on_preferred_band && score < switch_th {
+            // 在首选频段且健康度跌破切换阈值 → 准备下切到非首选
             self.state = State::GradientDetect;
             if self
                 .down_deb
@@ -163,16 +165,9 @@ impl StateMachine {
             return SwitchHint::None;
         }
 
-        if score < detect_th {
-            self.state = State::GradientDetect;
-            self.down_deb.reset();
-            self.up_deb.reset();
-            return SwitchHint::None;
-        }
-
-        // 健康：若在非首选频段，上切防抖
-        self.down_deb.reset();
         if !on_preferred_band && score >= detect_th {
+            // 在非首选频段且健康度恢复 → 准备上切回首选
+            self.down_deb.reset();
             if self
                 .up_deb
                 .push_and_ready(score, |m| m >= detect_th)
@@ -185,8 +180,10 @@ impl StateMachine {
             return SwitchHint::None;
         }
 
+        // 中间区域：仅梯度检测，不触发切换
+        self.state = State::GradientDetect;
+        self.down_deb.reset();
         self.up_deb.reset();
-        self.state = State::Idle;
         SwitchHint::None
     }
 
