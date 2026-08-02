@@ -65,28 +65,24 @@ fn main() {
         }
     });
 
-    // 主循环：每秒读取 wpa STATUS → 更新 snapshot
+    // 主循环：每秒 STATUS + SIGNAL_POLL（补 RSSI）→ 更新 snapshot
     loop {
         let status = {
             let w = wpa.lock().unwrap();
-            w.status().ok()
+            w.status_with_signal().ok()
         };
-        let mut s = snapshot.lock().unwrap();
         if let Some(st) = status {
+            let mut s = snapshot.lock().unwrap();
             s.state = st.wpa_state.clone();
             s.rssi = st.signal_dbm.unwrap_or(-100);
             s.ssid = st.ssid.clone().unwrap_or_default();
-            // score: Phase 2 才调用 health_score，Phase 1 仅转 RSSI 作为占位
+            s.band = match st.freq {
+                Some(f) if f > 5000 => "5".into(),
+                Some(_) => "2.4".into(),
+                None => s.band.clone(),
+            };
+            // Phase 1：RSSI 线性占位分；Phase 2 换 health_score
             s.score = ((s.rssi + 90) as f32 / 50.0 * 100.0).clamp(0.0, 100.0);
-        }
-        // band 从 freq 推断：> 5000 = 5G
-        if let Ok(w) = wpa.lock() {
-            if let Ok(st) = w.status() {
-                s.band = match st.freq {
-                    Some(f) if f > 5000 => "5",
-                    _ => "2.4",
-                }.to_string();
-            }
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }

@@ -237,6 +237,13 @@ mod platform {
             log::debug!("wpa STATUS raw:\n{raw}");
             Ok(WpaStatus::parse(&raw))
         }
+
+        /// SIGNAL_POLL：小米 STATUS 无 RSSI，用此补 signal_dbm
+        pub fn signal_poll(&self) -> Result<WpaStatus, WpaError> {
+            let raw = self.command("SIGNAL_POLL", Duration::from_secs(3))?;
+            log::debug!("wpa SIGNAL_POLL raw:\n{raw}");
+            Ok(WpaStatus::parse(&raw))
+        }
     }
 
     impl Drop for WpaCtrlImpl {
@@ -335,6 +342,10 @@ mod platform {
             let raw = self.command("STATUS", Duration::from_secs(3))?;
             Ok(WpaStatus::parse(&raw))
         }
+
+        pub fn signal_poll(&self) -> Result<WpaStatus, WpaError> {
+            Ok(WpaStatus::parse("RSSI=-65\nFREQUENCY=5180\n"))
+        }
     }
 
     pub fn discover() -> Vec<String> {
@@ -397,6 +408,27 @@ impl WpaCtrl {
 
     pub fn status(&self) -> Result<WpaStatus, WpaError> {
         self.inner.status()
+    }
+
+    pub fn signal_poll(&self) -> Result<WpaStatus, WpaError> {
+        self.inner.signal_poll()
+    }
+
+    /// STATUS + 必要时 SIGNAL_POLL 补 RSSI（小米实测 STATUS 无信号字段）
+    pub fn status_with_signal(&self) -> Result<WpaStatus, WpaError> {
+        let mut st = self.status()?;
+        if st.signal_dbm.is_none() {
+            if let Ok(sig) = self.signal_poll() {
+                if let Some(rssi) = sig.signal_dbm {
+                    st.signal_dbm = Some(rssi);
+                }
+                // 合并 raw 便于调试
+                for (k, v) in sig.raw {
+                    st.raw.entry(k).or_insert(v);
+                }
+            }
+        }
+        Ok(st)
     }
 
     pub fn command(&self, cmd: &str) -> Result<String, WpaError> {
