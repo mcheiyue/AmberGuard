@@ -23,6 +23,22 @@ fn main() {
     log::info!("AmberGuard Phase 1 daemon started");
     log::info!("Interface: {}, Listen: {}", config.interface, config.listen);
 
+    // 连接 wpa_supplicant
+    let wpa = match wpa_ctrl::WpaCtrl::auto_connect() {
+        Ok(w) => {
+            log::info!("wpa_supplicant connected");
+            w
+        }
+        Err(e) => {
+            log::error!("wpa_supplicant connect failed: {e} — running in offline mode");
+            // 降级：保留 mock 数据
+            let mut s = StatusSnapshot::new();
+            s.state = "OFFLINE".to_string();
+            offline_loop(config);
+        }
+    };
+    let wpa = Arc::new(Mutex::new(wpa));
+
     let snapshot = Arc::new(Mutex::new(StatusSnapshot::new()));
 
     let addr: SocketAddr = config.listen.parse().expect("bad listen address");
@@ -30,6 +46,7 @@ fn main() {
     log::info!("HTTP server listening on {}", addr);
 
     let snapshot2 = Arc::clone(&snapshot);
+    let _wpa2 = Arc::clone(&wpa);
     thread::spawn(move || {
         for req in server.incoming_requests() {
             match req.url() {
@@ -48,16 +65,52 @@ fn main() {
         }
     });
 
+    // 主循环：每秒读取 wpa STATUS → 更新 snapshot
+    loop {
+        let status = {
+            let w = wpa.lock().unwrap();
+            w.status().ok()
+        };
+        let mut s = snapshot.lock().unwrap();
+        if let Some(st) = status {
+            s.state = st.wpa_state.clone();
+            s.rssi = st.signal_dbm.unwrap_or(-100);
+            s.ssid = st.ssid.clone().unwrap_or_default();
+            // score: Phase 2 才调用 health_score，Phase 1 仅转 RSSI 作为占位
+            s.score = ((s.rssi + 90) as f32 / 50.0 * 100.0).clamp(0.0, 100.0);
+        }
+        // band 从 freq 推断：> 5000 = 5G
+        if let Ok(w) = wpa.lock() {
+            if let Ok(st) = w.status() {
+                s.band = match st.freq {
+                    Some(f) if f > 5000 => "5",
+                    _ => "2.4",
+                }.to_string();
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+fn offline_loop(_config: Config) -> ! {
+    let snapshot = Arc::new(Mutex::new(StatusSnapshot::new()));
+    let snapshot2 = Arc::clone(&snapshot);
+    let addr = "127.0.0.1:8080".parse::<SocketAddr>().expect("addr");
+    let server = Server::http(addr).expect("listen");
+    thread::spawn(move || {
+        for req in server.incoming_requests() {
+            let s = snapshot2.lock().unwrap();
+            let json = serde_json::to_string(&*s).unwrap();
+            let _ = req.respond(Response::from_string(json));
+        }
+    });
     let mut counter = 0u32;
     loop {
-        {
-            let mut s = snapshot.lock().unwrap();
-            s.rssi = -55 - (counter % 20) as i32;
-            s.score = 42.0;
-            s.band = if counter % 2 == 0 { "2.4" } else { "5" };
-            s.state = "CONNECTED".to_string();
-            counter += 1;
-        }
+        let mut s = snapshot.lock().unwrap();
+        s.rssi = -55 - (counter % 20) as i32;
+        s.score = 42.0;
+        s.band = if counter % 2 == 0 { "2.4".to_string() } else { "5".to_string() };
+        counter += 1;
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }

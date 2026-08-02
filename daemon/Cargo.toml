@@ -16,7 +16,7 @@ env_logger = "0.11"
 
 # Unix 套接字 / 系统调用；Windows 宿主仅做骨架编译与 HTTP 联调
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", default-features = false, features = ["socket", "uio", "fs"] }
+nix = { version = "0.29", default-features = false, features = ["socket", "uio", "fs", "poll"] }
 
 [features]
 default = []
