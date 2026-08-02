@@ -128,7 +128,7 @@ mod platform {
                 poll_timeout,
             ).map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
 
-            let n = read(fd_to_borrowed(fd), &mut buf)
+            let n = read(fd.as_raw_fd(), &mut buf)
                 .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
             buf.truncate(n);
             String::from_utf8(buf)
