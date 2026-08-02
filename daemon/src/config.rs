@@ -42,6 +42,12 @@ pub struct Config {
     /// 可选：强制 wpa ctrl 路径（覆盖自动探测）
     #[serde(default)]
     pub wpa_ctrl_path: Option<String>,
+    /// 异名双频羁绊（如 5G SSID 与 2.4G SSID 不同）
+    #[serde(default)]
+    pub bonds: Vec<crate::band_bond::SsidBond>,
+    /// 工作模式：daily / pause
+    #[serde(default = "default_mode")]
+    pub mode: String,
 }
 
 fn default_interface() -> String {
@@ -59,6 +65,9 @@ fn default_score_detect() -> f32 {
 fn default_score_switch() -> f32 {
     30.0
 }
+fn default_mode() -> String {
+    "daily".into()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -69,6 +78,8 @@ impl Default for Config {
             score_detect_threshold: default_score_detect(),
             score_switch_threshold: default_score_switch(),
             wpa_ctrl_path: None,
+            bonds: Vec::new(),
+            mode: default_mode(),
         }
     }
 }

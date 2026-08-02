@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use tiny_http::{Response, Server};
 
-use crate::band_bond::{best_on_band, parse_scan_results};
+use crate::band_bond::{best_bonded_on_band, network_id_for_ssid, parse_scan_results};
 use crate::config::Config;
 use crate::health_score::health_score;
 use crate::state_machine::{State, StateMachine, SwitchHint};
@@ -149,57 +149,94 @@ fn main() {
 
                 let target = match hint {
                     SwitchHint::Downswitch => {
-                        // 5G→2.4G：对侧 2.4 信号别太差
-                        best_on_band(&scans, &ssid, false, -80)
+                        best_bonded_on_band(&scans, &ssid, false, -80, &config.bonds)
                     }
-                    SwitchHint::Upswitch => {
-                        best_on_band(&scans, &ssid, true, config.upswitch_rssi_min_dbm)
-                    }
+                    SwitchHint::Upswitch => best_bonded_on_band(
+                        &scans,
+                        &ssid,
+                        true,
+                        config.upswitch_rssi_min_dbm,
+                        &config.bonds,
+                    ),
                     SwitchHint::None => None,
                 };
 
                 if let Some(peer) = target {
-                    if !peer.bssid.eq_ignore_ascii_case(&cur_bssid) {
-                        log::info!(
-                            "switch {:?}: ROAM {} (freq={} sig={}) score={score:.1}",
-                            hint,
-                            peer.bssid,
-                            peer.freq,
-                            peer.signal
-                        );
-                        let bond = format!("{ssid}/{}", peer.bssid);
-                        match wpa.lock().unwrap().roam(&peer.bssid) {
-                            Ok(()) => {
-                                // 等回 COMPLETED
-                                let mut ok = false;
-                                for _ in 0..25 {
-                                    thread::sleep(Duration::from_millis(200));
-                                    if let Ok(w) = wpa.lock() {
-                                        if let Ok(s2) = w.status() {
-                                            if s2.wpa_state == "COMPLETED" {
-                                                ok = true;
-                                                break;
-                                            }
+                    if peer.bssid.eq_ignore_ascii_case(&cur_bssid) {
+                        sm.finish_switch_ok();
+                        continue;
+                    }
+                    let bond_key = format!("{ssid}->{}/{}", peer.ssid, peer.bssid);
+                    let same_ssid = peer.ssid == ssid;
+                    log::info!(
+                        "switch {:?}: {} {} ssid={} freq={} sig={} score={score:.1}",
+                        hint,
+                        if same_ssid { "ROAM" } else { "SELECT" },
+                        peer.bssid,
+                        peer.ssid,
+                        peer.freq,
+                        peer.signal
+                    );
+
+                    let switch_res = if same_ssid {
+                        wpa.lock().unwrap().roam(&peer.bssid)
+                    } else {
+                        // 异 SSID：需已保存的 network id
+                        let list = wpa.lock().unwrap().list_networks().unwrap_or_default();
+                        match network_id_for_ssid(&list, &peer.ssid) {
+                            Some(nid) => {
+                                let w = wpa.lock().unwrap();
+                                // 锁定 BSSID 后 SELECT（失败不阻塞清锁——以实机为准）
+                                let _ = w.set_network_bssid(nid, &peer.bssid);
+                                let r = w.select_network(nid);
+                                let _ = w.set_network_bssid(nid, "\"\"");
+                                r
+                            }
+                            None => {
+                                log::warn!(
+                                    "peer ssid {} not in LIST_NETWORKS — save WiFi first",
+                                    peer.ssid
+                                );
+                                Err(wpa_ctrl::WpaError::Parse(format!(
+                                    "no network id for {}",
+                                    peer.ssid
+                                )))
+                            }
+                        }
+                    };
+
+                    match switch_res {
+                        Ok(()) => {
+                            let mut ok = false;
+                            for _ in 0..30 {
+                                thread::sleep(Duration::from_millis(200));
+                                if let Ok(w) = wpa.lock() {
+                                    if let Ok(s2) = w.status() {
+                                        if s2.wpa_state == "COMPLETED" {
+                                            ok = true;
+                                            break;
                                         }
                                     }
                                 }
-                                if ok {
-                                    sm.finish_switch_ok();
-                                    log::info!("switch OK");
-                                } else {
-                                    sm.enter_penalty(&bond);
-                                }
                             }
-                            Err(e) => {
-                                log::error!("ROAM failed: {e}");
-                                sm.enter_penalty(&bond);
+                            if ok {
+                                sm.finish_switch_ok();
+                                log::info!("switch OK -> {}", peer.ssid);
+                            } else {
+                                sm.enter_penalty(&bond_key);
                             }
                         }
-                    } else {
-                        sm.finish_switch_ok();
+                        Err(e) => {
+                            log::error!("switch failed: {e}");
+                            sm.enter_penalty(&bond_key);
+                        }
                     }
                 } else {
-                    log::info!("switch {:?}: no peer AP in scan", hint);
+                    log::info!(
+                        "switch {:?}: no bonded peer (ssid={ssid}, bonds={})",
+                        hint,
+                        config.bonds.len()
+                    );
                     sm.finish_switch_ok();
                 }
             }
