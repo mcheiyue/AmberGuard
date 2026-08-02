@@ -68,9 +68,10 @@ jobs:
           mkdir -p zip_root/system/bin
           cp out/jniLibs/arm64-v8a/amberguard zip_root/system/bin/amberguard
           chmod 755 zip_root/system/bin/amberguard
-          for f in module.prop post-fs-data.sh service.sh sepolicy.rule customize.sh system.prop; do
+          for f in module.prop post-fs-data.sh service.sh sepolicy.rule customize.sh uninstall.sh; do
             [ -f "$f" ] && cp "$f" zip_root/
           done
+          # 不打包 system.prop（避免 ro.* 环境指纹）；若日后确需再按需加入
           # KSU WebUI / MMRL 入口
           if [ -d webroot ]; then
             cp -a webroot zip_root/

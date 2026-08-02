@@ -1,17 +1,22 @@
-# Magisk sepolicy：class 与 type 用空格分隔（不是 type:class）
-# 实机：magisk → hal_wifi_supplicant_default；目录 type=wpa_data_file
+# 最小 sepolicy：只放行 wpa 控制通道，不给 magisk 整段开放 tcp 能力
+# Magisk 会自动加载本文件；勿在 post-fs-data 再 magiskpolicy --live 重复注入
+# 类型名以实机为准：wpa_data_file + hal_wifi_supplicant_default
 
-# Magisk sepolicy：class 与 type 用空格分隔（不是 type:class）
-# 实机：magisk → hal_wifi_supplicant_default；目录 type=wpa_data_file
-
+# 在 wpa 控制目录建客户端 sock / 收发
 allow magisk wpa_data_file dir { search getattr write add_name remove_name }
 allow magisk wpa_data_file sock_file { create read write getattr open unlink setattr }
 allow magisk wpa_data_file unix_dgram_socket { create bind connect read write setattr getattr getopt setopt }
 
+# 与 wpa_supplicant 域互发 dgram
 allow magisk hal_wifi_supplicant_default unix_dgram_socket { sendto }
 allow hal_wifi_supplicant_default magisk unix_dgram_socket { sendto }
-allow magisk magisk unix_dgram_socket { create bind connect read write setattr getattr getopt setopt }
 
+# 部分机型 vendor 路径
 allow magisk vendor_wifi_vendor_wpa_socket sock_file { read write getattr open }
 
+# 本模块自用 dgram（客户端 bind）
+allow magisk magisk unix_dgram_socket { create bind connect read write setattr getattr getopt setopt }
+
+# HTTP 仅 127.0.0.1 —— 仍需 tcp_socket；尽量不扩大到无关 class
+# 若隐藏框架对 magisk:tcp_socket 敏感，可改为仅 bind 本机后由实机 avc 再补
 allow magisk magisk tcp_socket { create bind connect listen accept read write setattr getattr getopt setopt }

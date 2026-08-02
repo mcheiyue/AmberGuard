@@ -1,4 +1,2 @@
-#
-# AmberGuard system properties
-#
-ro.amberguard.version=v0.1.0
+# 故意留空：不注入任何 ro.* 指纹（环境检测会扫 getprop）
+# 版本只写在 module.prop
