@@ -1,5 +1,6 @@
-// wpa_ctrl.rs — wpa_supplicant 控制接口
-// Unix：真 socket 连接（nix::sys::socket）；其他平台：模拟 stub（用于 Windows 本地编译）
+// wpa_ctrl.rs — 对齐 hostap wpa_ctrl.c：
+// SOCK_DGRAM + 客户端 bind 本地路径 + connect 服务端
+// 小米等机型：ctrl_interface=/data/vendor/wifi/wpa/sockets，服务端名为 wlan0
 
 use std::collections::HashMap;
 
@@ -13,7 +14,6 @@ pub enum WpaError {
     NotConnected,
 }
 
-/// wpa STATUS 的解析结果
 #[derive(Debug, Clone, Default)]
 pub struct WpaStatus {
     pub wpa_state: String,
@@ -23,12 +23,10 @@ pub struct WpaStatus {
     pub signal_dbm: Option<i32>,
     pub ip_address: Option<String>,
     pub disabled: Option<u32>,
-    /// 其他未识别的字段
     pub raw: HashMap<String, String>,
 }
 
 impl WpaStatus {
-    /// 从 STATUS 命令的文本输出解析
     pub fn parse(text: &str) -> Self {
         let mut s = WpaStatus::default();
         for line in text.lines() {
@@ -36,18 +34,24 @@ impl WpaStatus {
             if line.is_empty() {
                 continue;
             }
-            if let Some(eq) = line.find('=') {
-                let key = line[..eq].trim().to_string();
-                let val = line[eq + 1..].trim().to_string();
-                match key.as_str() {
-                    "wpa_state" => s.wpa_state = val,
-                    "ssid" => s.ssid = Some(val),
-                    "bssid" => s.bssid = Some(val),
-                    "freq" => s.freq = val.parse::<u32>().ok(),
-                    "signal_dbm" => s.signal_dbm = val.parse::<i32>().ok(),
-                    "ip_address" => s.ip_address = Some(val),
-                    "disabled" => s.disabled = val.parse::<u32>().ok(),
-                    _ => { s.raw.insert(key, val); }
+            let Some(eq) = line.find('=') else { continue };
+            let key = line[..eq].trim();
+            let val = line[eq + 1..].trim().to_string();
+            match key {
+                "wpa_state" => s.wpa_state = val,
+                "ssid" => s.ssid = Some(val),
+                "bssid" => s.bssid = Some(val),
+                "freq" => s.freq = val.parse().ok(),
+                // Android / 各厂商字段名不一
+                "signal_dbm" | "signal" | "rssi" | "RSSI" => {
+                    if s.signal_dbm.is_none() {
+                        s.signal_dbm = val.parse().ok();
+                    }
+                }
+                "ip_address" => s.ip_address = Some(val),
+                "disabled" => s.disabled = val.parse().ok(),
+                _ => {
+                    s.raw.insert(key.to_string(), val);
                 }
             }
         }
@@ -55,14 +59,15 @@ impl WpaStatus {
     }
 }
 
-// ── 平台实现 ──────────────────────────────────────────
-
 #[cfg(unix)]
 mod platform {
     use std::os::unix::io::{AsRawFd, BorrowedFd, OwnedFd};
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use nix::sys::socket::{socket, connect, UnixAddr, SockFlag, SockType};
+    use nix::sys::socket::{
+        bind, connect, socket, SockFlag, SockType, UnixAddr,
+    };
     use nix::unistd::{read, write};
 
     use super::*;
@@ -73,34 +78,92 @@ mod platform {
         unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) }
     }
 
+    fn io_err(e: nix::Error) -> WpaError {
+        WpaError::Io(std::io::Error::from_raw_os_error(e as i32))
+    }
+
     pub struct WpaCtrlImpl {
         fd: Option<OwnedFd>,
+        /// 服务端路径（日志用）
         ctrl_path: String,
+        /// 客户端本地 bind 路径（文件系统 socket 需在 Drop 时 unlink）
+        local_path: Option<PathBuf>,
     }
 
     impl WpaCtrlImpl {
         pub fn new(ctrl_path: String) -> Self {
-            Self { fd: None, ctrl_path }
+            Self {
+                fd: None,
+                ctrl_path,
+                local_path: None,
+            }
         }
 
         pub fn connect(&mut self) -> Result<(), WpaError> {
+            // hostap wpa_ctrl：SOCK_DGRAM，不是 SEQPACKET
             let fd = socket(
                 nix::sys::socket::AddressFamily::Unix,
-                SockType::SeqPacket,
+                SockType::Datagram,
                 SockFlag::empty(),
                 None,
-            ).map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
+            )
+            .map_err(io_err)?;
 
-            let sock_addr = if self.ctrl_path.starts_with('@') {
-                UnixAddr::new_abstract(self.ctrl_path[1..].as_bytes())
-                    .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?
+            if self.ctrl_path.starts_with('@') {
+                // abstract：客户端也 bind 一个 abstract 名，再 connect 服务端
+                let client_name = format!("wpa_ctrl_{}", std::process::id());
+                let local = UnixAddr::new_abstract(client_name.as_bytes()).map_err(io_err)?;
+                bind(fd.as_raw_fd(), &local).map_err(io_err)?;
+                let remote =
+                    UnixAddr::new_abstract(self.ctrl_path[1..].as_bytes()).map_err(io_err)?;
+                connect(fd.as_raw_fd(), &remote).map_err(io_err)?;
             } else {
-                UnixAddr::new(self.ctrl_path.as_bytes())
-                    .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?
-            };
+                // 文件系统 socket：在同目录 bind 客户端路径，再 connect 服务端
+                let server = Path::new(&self.ctrl_path);
+                let dir = server
+                    .parent()
+                    .ok_or_else(|| WpaError::Parse("ctrl path has no parent dir".into()))?;
 
-            connect(fd.as_raw_fd(), &sock_addr)
-                .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
+                // 尝试在同目录创建；失败则退到 /data/local/tmp（权限兜底）
+                let try_dirs = [dir, Path::new("/data/local/tmp"), Path::new("/dev/socket")];
+                let mut bound = false;
+                let mut last = WpaError::NotConnected;
+                for d in try_dirs {
+                    let local_path = d.join(format!(
+                        "wpa_ctrl_{}-{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|t| t.as_nanos())
+                            .unwrap_or(0)
+                    ));
+                    // 路径过长 Unix 会失败
+                    if local_path.as_os_str().len() >= 108 {
+                        continue;
+                    }
+                    let _ = std::fs::remove_file(&local_path);
+                    match UnixAddr::new(local_path.as_os_str()) {
+                        Ok(local_addr) => match bind(fd.as_raw_fd(), &local_addr) {
+                            Ok(()) => {
+                                self.local_path = Some(local_path);
+                                bound = true;
+                                break;
+                            }
+                            Err(e) => {
+                                last = io_err(e);
+                                let _ = std::fs::remove_file(&local_path);
+                            }
+                        },
+                        Err(e) => last = io_err(e),
+                    }
+                }
+                if !bound {
+                    return Err(last);
+                }
+
+                let remote = UnixAddr::new(server.as_os_str()).map_err(io_err)?;
+                connect(fd.as_raw_fd(), &remote).map_err(io_err)?;
+            }
 
             self.fd = Some(fd);
             log::info!("wpa_ctrl: connected to {}", self.ctrl_path);
@@ -109,30 +172,32 @@ mod platform {
 
         pub fn send_command(&self, cmd: &str) -> Result<(), WpaError> {
             let fd = self.fd.as_ref().ok_or(WpaError::NotConnected)?;
-            write(fd_to_borrowed(fd), cmd.as_bytes())
-                .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
+            write(fd_to_borrowed(fd), cmd.as_bytes()).map_err(io_err)?;
             Ok(())
         }
 
         pub fn receive_reply(&self, timeout: Duration) -> Result<String, WpaError> {
             let fd = self.fd.as_ref().ok_or(WpaError::NotConnected)?;
             let mut buf = vec![0u8; BUF_SIZE];
-            let poll_timeout = nix::poll::PollTimeout::from(
-                timeout.as_millis().try_into().unwrap_or(u16::MAX)
-            );
-            nix::poll::poll(
+            let poll_timeout =
+                nix::poll::PollTimeout::from(timeout.as_millis().try_into().unwrap_or(u16::MAX));
+            let nready = nix::poll::poll(
                 &mut [nix::poll::PollFd::new(
                     fd_to_borrowed(fd),
                     nix::poll::PollFlags::POLLIN,
                 )],
                 poll_timeout,
-            ).map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
-
-            let n = read(fd.as_raw_fd(), &mut buf)
-                .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
+            )
+            .map_err(io_err)?;
+            if nready == 0 {
+                return Err(WpaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "wpa reply timeout",
+                )));
+            }
+            let n = read(fd.as_raw_fd(), &mut buf).map_err(io_err)?;
             buf.truncate(n);
-            String::from_utf8(buf)
-                .map_err(|_| WpaError::Parse("non-utf8 reply from wpa".into()))
+            String::from_utf8(buf).map_err(|_| WpaError::Parse("non-utf8 reply from wpa".into()))
         }
 
         pub fn command(&self, cmd: &str, timeout: Duration) -> Result<String, WpaError> {
@@ -142,33 +207,76 @@ mod platform {
 
         pub fn status(&self) -> Result<WpaStatus, WpaError> {
             let raw = self.command("STATUS", Duration::from_secs(3))?;
+            log::debug!("wpa STATUS raw:\n{raw}");
             Ok(WpaStatus::parse(&raw))
         }
     }
 
+    impl Drop for WpaCtrlImpl {
+        fn drop(&mut self) {
+            self.fd.take();
+            if let Some(p) = self.local_path.take() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+
+    /// 是否像「服务端」控制口（不要连历史客户端 wpa_ctrl_* 残留）
+    fn looks_like_server_socket(name: &str) -> bool {
+        if name.starts_with("wpa_ctrl_") {
+            return false;
+        }
+        // 接口名：wlan0 / p2p0 / wlan1 ...
+        name.starts_with("wlan")
+            || name.starts_with("p2p")
+            || name.starts_with("wifi")
+            || name == "wpa_wlan0"
+            || name.starts_with("vendor_wpa")
+    }
+
     pub fn discover() -> Vec<String> {
         let mut candidates = Vec::new();
-        candidates.push("@wpa_wlan0".into());
-        for dir in &[
+
+        // 1) conf 明示的 DIR（小米实测）
+        let conf_dirs = [
+            "/data/vendor/wifi/wpa/sockets",
             "/data/misc/wifi/sockets",
+            "/data/misc/wifi/wpa_supplicant",
+            "/data/misc/wifi/mainline_supplicant/sockets",
             "/data/vendor/wifi/sockets",
-            "/data/misc/wifi",
-        ] {
+        ];
+        for dir in conf_dirs {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
-                    let p = entry.path();
-                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    if name.starts_with("wpa_ctrl") || name.starts_with("wpa_wlan") {
-                        candidates.push(p.to_string_lossy().to_string());
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if looks_like_server_socket(&name) {
+                        candidates.push(entry.path().to_string_lossy().to_string());
                     }
                 }
             }
         }
+
+        // 2) /dev/socket 下 vendor 控制口（小米：vendor_wpa_wlan0）
+        if let Ok(entries) = std::fs::read_dir("/dev/socket") {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains("wpa") || name.contains("wifi") {
+                    candidates.push(entry.path().to_string_lossy().to_string());
+                }
+            }
+        }
+
+        // 3) abstract 常见名
+        candidates.push("@wpa_wlan0".into());
+        candidates.push("@wpa_wifi0".into());
+
+        // 去重保序
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|c| seen.insert(c.clone()));
+        log::info!("wpa_ctrl: discover candidates: {candidates:?}");
         candidates
     }
 }
-
-// ── Windows / 非 Unix mock ──────────────────────────
 
 #[cfg(not(unix))]
 mod platform {
@@ -185,7 +293,10 @@ mod platform {
         }
 
         pub fn connect(&mut self) -> Result<(), WpaError> {
-            log::warn!("wpa_ctrl: mock connect (not unix), path={}", self.ctrl_path);
+            log::warn!(
+                "wpa_ctrl: mock connect (not unix), path={}",
+                self.ctrl_path
+            );
             Ok(())
         }
 
@@ -204,15 +315,12 @@ mod platform {
     }
 }
 
-// ── 对外暴露的 WpaCtrl 结构体 ─────────────────────
-
 pub struct WpaCtrl {
     inner: platform::WpaCtrlImpl,
     connected: bool,
 }
 
 impl WpaCtrl {
-    /// 创建并尝试自动发现 & 连接
     pub fn auto_connect() -> Result<Self, WpaError> {
         let candidates = platform::discover();
         log::info!("wpa_ctrl: probing {} candidates", candidates.len());
@@ -224,12 +332,25 @@ impl WpaCtrl {
             };
             match wpa.inner.connect() {
                 Ok(()) => {
-                    wpa.connected = true;
-                    log::info!("wpa_ctrl: connected via {path}");
-                    return Ok(wpa);
+                    // 连通后再发 STATUS 确认不是僵尸 socket
+                    match wpa.inner.status() {
+                        Ok(st) => {
+                            log::info!(
+                                "wpa_ctrl: OK via {path} state={} ssid={:?}",
+                                st.wpa_state,
+                                st.ssid
+                            );
+                            wpa.connected = true;
+                            return Ok(wpa);
+                        }
+                        Err(e) => {
+                            log::warn!("wpa_ctrl: {path} connected but STATUS failed: {e}");
+                            last_err = e;
+                        }
+                    }
                 }
                 Err(e) => {
-                    log::debug!("wpa_ctrl: {path} failed: {e}");
+                    log::info!("wpa_ctrl: {path} failed: {e}");
                     last_err = e;
                 }
             }
@@ -237,7 +358,6 @@ impl WpaCtrl {
         Err(last_err)
     }
 
-    /// 直接指定路径连接
     pub fn connect_path(path: &str) -> Result<Self, WpaError> {
         let mut wpa = WpaCtrl {
             inner: platform::WpaCtrlImpl::new(path.into()),

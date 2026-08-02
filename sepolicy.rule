@@ -1,27 +1,29 @@
-# AmberGuard SELinux 静态打底（PLAN §7.3，显式 perm，不展开 AOSP 宏）
-# 类型名以目标机 ls -Z / avc denied 实测为准，以下为起点草稿
+# AmberGuard SELinux — 以小米 22081212C 实机 ls -Z 为起点
+# magiskpolicy 不认识的类型会 Syntax error，只写实测相关类型
+# 进程域：Magisk service 拉起的 daemon 常见为 magisk / su / untrusted_app 变体，多域尝试
 
-# wpa 控制 socket：sock_file 读写 + 目录 search
-allow magisk wpa_socket:sock_file { read write getattr open };
-allow magisk wpa_socket:dir { search getattr };
-allow magisk wifi_data_file:dir { search getattr };
+# /dev/socket/vendor_wpa_wlan0
+# u:object_r:vendor_wifi_vendor_wpa_socket:s0
+allow magisk vendor_wifi_vendor_wpa_socket:sock_file { read write getattr open };
+allow su vendor_wifi_vendor_wpa_socket:sock_file { read write getattr open };
+
+# /data/vendor/wifi/wpa/sockets/* （ctrl_interface DIR）
+# 具体 type 以 avc 为准；先放宽常见 wifi vendor 数据类
+allow magisk vendor_wifi_data_file:dir { search getattr write add_name remove_name };
+allow magisk vendor_wifi_data_file:sock_file { create read write getattr open unlink setattr };
+allow su vendor_wifi_data_file:dir { search getattr write add_name remove_name };
+allow su vendor_wifi_data_file:sock_file { create read write getattr open unlink setattr };
+
+# 通用 wifi 数据目录（部分机型）
+allow magisk wifi_data_file:dir { search getattr write add_name remove_name };
 allow magisk wifi_data_file:sock_file { create read write getattr open unlink };
+allow su wifi_data_file:dir { search getattr write add_name remove_name };
+allow su wifi_data_file:sock_file { create read write getattr open unlink };
 
-# netlink（nl80211 走 NETLINK_GENERIC）
-allow magisk netlink_generic_socket:socket { create bind read write getattr setsockopt };
-allow magisk netlink_socket:socket { create bind read write getattr setsockopt };
+# Unix 客户端 socket 创建
+allow magisk self:unix_dgram_socket { create bind connect read write setattr getattr getopt setopt };
+allow su self:unix_dgram_socket { create bind connect read write setattr getattr getopt setopt };
 
-# HTTP 监听（127.0.0.1:8080）
-allow magisk port_t:tcp_socket { name_bind read write getattr setopt };
-allow magisk node_t:tcp_socket { node_bind read write };
-
-# sysfs 屏状态
-allow magisk sysfs_leds:dir { search getattr };
-allow magisk sysfs_leds:file { read getattr open };
-
-# input event（电源键，可选）
-allow magisk input_device:dir { search getattr };
-allow magisk input_device:chr_file { read getattr open };
-
-# /proc/net/wireless
-allow magisk proc_net:file { read getattr open };
+# 本机 HTTP 127.0.0.1:8080
+allow magisk self:tcp_socket { create bind connect listen accept read write setattr getattr getopt setopt };
+allow su self:tcp_socket { create bind connect listen accept read write setattr getattr getopt setopt };

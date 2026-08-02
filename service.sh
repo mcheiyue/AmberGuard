@@ -25,10 +25,14 @@ mkdir -p "$AG_DIR"
   # 确保可执行
   chmod 755 "$DAEMON" 2>/dev/null
 
+  # 详细日志进 service.log，方便实机排查 wpa 连接
+  export RUST_LOG="${RUST_LOG:-info}"
+  export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+
   crash=0
   sleep_s=5
   while true; do
-    echo "启动 daemon: $DAEMON (crash=$crash sleep=${sleep_s}s)"
+    echo "启动 daemon: $DAEMON (crash=$crash sleep=${sleep_s}s) RUST_LOG=$RUST_LOG"
     # setsid 脱离会话，避免 Magisk 脚本退出带走进程
     setsid "$DAEMON" >>"$LOG" 2>&1
     rc=$?
