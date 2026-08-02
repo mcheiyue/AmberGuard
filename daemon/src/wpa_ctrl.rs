@@ -59,7 +59,7 @@ impl WpaStatus {
 
 #[cfg(unix)]
 mod platform {
-    use std::os::unix::io::OwnedFd;
+    use std::os::unix::io::{AsRawFd, BorrowedFd, OwnedFd};
     use std::time::Duration;
 
     use nix::sys::socket::{socket, connect, UnixAddr, SockFlag, SockType};
@@ -68,6 +68,10 @@ mod platform {
     use super::*;
 
     const BUF_SIZE: usize = 4096;
+
+    fn fd_to_borrowed(fd: &OwnedFd) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(fd.as_raw_fd()) }
+    }
 
     pub struct WpaCtrlImpl {
         fd: Option<OwnedFd>,
@@ -95,7 +99,7 @@ mod platform {
                     .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?
             };
 
-            connect(&fd, &sock_addr)
+            connect(fd.as_raw_fd(), &sock_addr)
                 .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
 
             self.fd = Some(fd);
@@ -105,7 +109,7 @@ mod platform {
 
         pub fn send_command(&self, cmd: &str) -> Result<(), WpaError> {
             let fd = self.fd.as_ref().ok_or(WpaError::NotConnected)?;
-            write(fd, cmd.as_bytes())
+            write(fd_to_borrowed(fd), cmd.as_bytes())
                 .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
             Ok(())
         }
@@ -117,11 +121,14 @@ mod platform {
                 timeout.as_millis().try_into().unwrap_or(u16::MAX)
             );
             nix::poll::poll(
-                &mut [nix::poll::PollFd::new(fd, nix::poll::PollFlags::POLLIN)],
+                &mut [nix::poll::PollFd::new(
+                    fd_to_borrowed(fd),
+                    nix::poll::PollFlags::POLLIN,
+                )],
                 poll_timeout,
             ).map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
 
-            let n = read(fd, &mut buf)
+            let n = read(fd_to_borrowed(fd), &mut buf)
                 .map_err(|e| WpaError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
             buf.truncate(n);
             String::from_utf8(buf)
