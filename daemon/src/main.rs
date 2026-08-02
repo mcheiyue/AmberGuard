@@ -27,9 +27,13 @@ mod wpa_ctrl;
 
 fn json_resp(body: String, code: StatusCode) -> Response<std::io::Cursor<Vec<u8>>> {
     let mut r = Response::from_string(body).with_status_code(code);
-    if let Ok(h) = Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..])
-    {
-        r.add_header(h);
+    for kv in &[
+        (&b"Content-Type"[..], &b"application/json; charset=utf-8"[..]),
+        (&b"Access-Control-Allow-Origin"[..], &b"*"[..]),
+    ] {
+        if let Ok(h) = Header::from_bytes(kv.0, kv.1) {
+            r.add_header(h);
+        }
     }
     r
 }
@@ -263,10 +267,26 @@ fn main() {
                 (Method::Get, "/") | (Method::Get, "/index.html") => {
                     let html = include_bytes!("web/static/index.html");
                     let mut r = Response::from_data(html.to_vec());
-                    if let Ok(h) =
-                        Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
-                    {
-                        r.add_header(h);
+                    for kv in &[
+                        (&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]),
+                        (&b"Access-Control-Allow-Origin"[..], &b"*"[..]),
+                    ] {
+                        if let Ok(h) = Header::from_bytes(kv.0, kv.1) {
+                            r.add_header(h);
+                        }
+                    }
+                    r
+                }
+                (Method::Options, _) => {
+                    let mut r = Response::from_string("").with_status_code(StatusCode(204));
+                    for kv in &[
+                        (&b"Access-Control-Allow-Origin"[..], &b"*"[..]),
+                        (&b"Access-Control-Allow-Methods"[..], &b"GET, POST, PUT, OPTIONS"[..]),
+                        (&b"Access-Control-Allow-Headers"[..], &b"Content-Type"[..]),
+                    ] {
+                        if let Ok(h) = Header::from_bytes(kv.0, kv.1) {
+                            r.add_header(h);
+                        }
                     }
                     r
                 }
