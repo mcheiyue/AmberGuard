@@ -1,29 +1,13 @@
-# AmberGuard SELinux — 以小米 22081212C 实机 ls -Z 为起点
-# magiskpolicy 不认识的类型会 Syntax error，只写实测相关类型
-# 进程域：Magisk service 拉起的 daemon 常见为 magisk / su / untrusted_app 变体，多域尝试
+# Magisk sepolicy：class 与 type 用空格分隔（不是 type:class）
+# 实机：magisk → hal_wifi_supplicant_default；目录 type=wpa_data_file
 
-# /dev/socket/vendor_wpa_wlan0
-# u:object_r:vendor_wifi_vendor_wpa_socket:s0
-allow magisk vendor_wifi_vendor_wpa_socket:sock_file { read write getattr open };
-allow su vendor_wifi_vendor_wpa_socket:sock_file { read write getattr open };
+allow magisk wpa_data_file dir { search getattr write add_name remove_name }
+allow magisk wpa_data_file sock_file { create read write getattr open unlink setattr }
 
-# /data/vendor/wifi/wpa/sockets/* （ctrl_interface DIR）
-# 具体 type 以 avc 为准；先放宽常见 wifi vendor 数据类
-allow magisk vendor_wifi_data_file:dir { search getattr write add_name remove_name };
-allow magisk vendor_wifi_data_file:sock_file { create read write getattr open unlink setattr };
-allow su vendor_wifi_data_file:dir { search getattr write add_name remove_name };
-allow su vendor_wifi_data_file:sock_file { create read write getattr open unlink setattr };
+allow magisk hal_wifi_supplicant_default unix_dgram_socket { sendto }
+allow hal_wifi_supplicant_default magisk unix_dgram_socket { sendto }
+allow magisk magisk unix_dgram_socket { create bind connect read write setattr getattr getopt setopt }
 
-# 通用 wifi 数据目录（部分机型）
-allow magisk wifi_data_file:dir { search getattr write add_name remove_name };
-allow magisk wifi_data_file:sock_file { create read write getattr open unlink };
-allow su wifi_data_file:dir { search getattr write add_name remove_name };
-allow su wifi_data_file:sock_file { create read write getattr open unlink };
+allow magisk vendor_wifi_vendor_wpa_socket sock_file { read write getattr open }
 
-# Unix 客户端 socket 创建
-allow magisk self:unix_dgram_socket { create bind connect read write setattr getattr getopt setopt };
-allow su self:unix_dgram_socket { create bind connect read write setattr getattr getopt setopt };
-
-# 本机 HTTP 127.0.0.1:8080
-allow magisk self:tcp_socket { create bind connect listen accept read write setattr getattr getopt setopt };
-allow su self:tcp_socket { create bind connect listen accept read write setattr getattr getopt setopt };
+allow magisk magisk tcp_socket { create bind connect listen accept read write setattr getattr getopt setopt }

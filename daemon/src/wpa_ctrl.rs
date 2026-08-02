@@ -118,48 +118,48 @@ mod platform {
                     UnixAddr::new_abstract(self.ctrl_path[1..].as_bytes()).map_err(io_err)?;
                 connect(fd.as_raw_fd(), &remote).map_err(io_err)?;
             } else {
-                // 文件系统 socket：在同目录 bind 客户端路径，再 connect 服务端
+                // 文件系统 socket：客户端必须 bind 在**同一目录**（wpa 才回得了包）
+                // 禁止落到 /dev/socket 或 /data/local/tmp——会 connect 成功但 STATUS 超时
                 let server = Path::new(&self.ctrl_path);
                 let dir = server
                     .parent()
                     .ok_or_else(|| WpaError::Parse("ctrl path has no parent dir".into()))?;
 
-                // 尝试在同目录创建；失败则退到 /data/local/tmp（权限兜底）
-                let try_dirs = [dir, Path::new("/data/local/tmp"), Path::new("/dev/socket")];
-                let mut bound = false;
-                let mut last = WpaError::NotConnected;
-                for d in try_dirs {
-                    let local_path = d.join(format!(
-                        "wpa_ctrl_{}-{}",
-                        std::process::id(),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|t| t.as_nanos())
-                            .unwrap_or(0)
-                    ));
-                    // 路径过长 Unix 会失败
-                    if local_path.as_os_str().len() >= 108 {
-                        continue;
-                    }
-                    let _ = std::fs::remove_file(&local_path);
-                    match UnixAddr::new(local_path.as_os_str()) {
-                        Ok(local_addr) => match bind(fd.as_raw_fd(), &local_addr) {
-                            Ok(()) => {
-                                self.local_path = Some(local_path);
-                                bound = true;
-                                break;
-                            }
-                            Err(e) => {
-                                last = io_err(e);
-                                let _ = std::fs::remove_file(&local_path);
-                            }
-                        },
-                        Err(e) => last = io_err(e),
-                    }
+                let local_path = dir.join(format!(
+                    "wpa_ctrl_{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|t| t.as_nanos() % 1_000_000)
+                        .unwrap_or(0)
+                ));
+                if local_path.as_os_str().len() >= 108 {
+                    return Err(WpaError::Parse(format!(
+                        "client path too long: {}",
+                        local_path.display()
+                    )));
                 }
-                if !bound {
-                    return Err(last);
+                let _ = std::fs::remove_file(&local_path);
+                let local_addr = UnixAddr::new(local_path.as_os_str()).map_err(io_err)?;
+                bind(fd.as_raw_fd(), &local_addr).map_err(|e| {
+                    WpaError::Io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!(
+                            "bind client in {} failed: {e} (need sepolicy wpa_data_file sock_file create)",
+                            dir.display()
+                        ),
+                    ))
+                })?;
+                // 权限对齐（wifi 组常需 660）
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &local_path,
+                        std::fs::Permissions::from_mode(0o660),
+                    );
                 }
+                self.local_path = Some(local_path);
 
                 let remote = UnixAddr::new(server.as_os_str()).map_err(io_err)?;
                 connect(fd.as_raw_fd(), &remote).map_err(io_err)?;
