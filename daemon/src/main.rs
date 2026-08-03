@@ -823,8 +823,12 @@ fn main() {
 
     let mut weak_bad_since: Option<Instant> = None;
     let mut weak_disconnected = false;
-    /// 最近扫描到的家网 5G 最强 RSSI（供阈值对照）
+    /// 最近扫描到的偏好侧最强 RSSI（供阈值对照）
     let mut cached_best_5g: Option<i32> = None;
+    /// 同一目标连续失败次数 → 加长冷却，避免狂点把系统网「管理员停用」
+    let mut fail_streak_key = String::new();
+    let mut fail_streak: u32 = 0;
+    let mut fail_backoff_until: Option<Instant> = None;
 
     loop {
         let (
@@ -1029,6 +1033,14 @@ fn main() {
                 "亮屏冷静窗，暂不切网".to_string()
             } else if bssid_locked {
                 "短时锁定当前 AP（防踢回）".to_string()
+            } else if fail_backoff_until
+                .map(|t| Instant::now() < t)
+                .unwrap_or(false)
+            {
+                let left = fail_backoff_until
+                    .map(|t| t.saturating_duration_since(Instant::now()).as_secs())
+                    .unwrap_or(0);
+                format!("目标连失败多次，退避中（剩 {left}s，避免系统停用网络）")
             } else if !home_aps.is_empty() && !in_home_now {
                 "当前不在家网".to_string()
             } else if weak_disconnected {
@@ -1103,10 +1115,25 @@ fn main() {
                 continue;
             }
 
-            // 手动保护期内：只观测，不切网
+            // 手动保护期内：只观测，不切网（手切优先，模块不抢）
             if hold_rem_now > 0 {
                 thread::sleep(Duration::from_secs(1));
                 continue;
+            }
+
+            // 连续代连失败退避：不狂点，避免系统「管理员停用」
+            if fail_backoff_until
+                .map(|t| Instant::now() < t)
+                .unwrap_or(false)
+            {
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+            if fail_backoff_until
+                .map(|t| Instant::now() >= t)
+                .unwrap_or(false)
+            {
+                fail_backoff_until = None;
             }
 
             // 亮屏冷静 / BSSID 短锁：不上切（下切弱信号救援仍允许？ponytail：锁期间全跳过自动切）
@@ -1502,6 +1529,9 @@ fn main() {
                             }
                             if ok {
                                 sm.finish_switch_ok();
+                                fail_streak = 0;
+                                fail_streak_key.clear();
+                                fail_backoff_until = None;
                                 lock_bssid_until =
                                     Some(Instant::now() + Duration::from_secs(45));
                                 if weak_rescue {
@@ -1514,6 +1544,28 @@ fn main() {
                                 }
                                 log::info!("switch OK -> {} ({})", peer.ssid, result);
                             } else {
+                                if fail_streak_key == bond_key {
+                                    fail_streak = fail_streak.saturating_add(1);
+                                } else {
+                                    fail_streak_key = bond_key.clone();
+                                    fail_streak = 1;
+                                }
+                                // 连续失败 ≥3：退避 3～5 分钟，别把网打停用
+                                if fail_streak >= 3 {
+                                    let back = 180 + (fail_streak as u64 - 3) * 60;
+                                    let back = back.min(600);
+                                    fail_backoff_until =
+                                        Some(Instant::now() + Duration::from_secs(back));
+                                    log::warn!(
+                                        "switch fail streak={fail_streak} target={bond_key} → backoff {back}s"
+                                    );
+                                    if let Ok(mut snap) = snapshot.lock() {
+                                        snap.last_error = format!(
+                                            "连「{}」连续失败 {fail_streak} 次，已退避 {back}s。请系统里检查该网是否被停用后重连保存",
+                                            peer.ssid
+                                        );
+                                    }
+                                }
                                 sm.enter_penalty(&bond_key);
                                 if weak_rescue {
                                     log::warn!("weak disconnect after failed rescue switch");
