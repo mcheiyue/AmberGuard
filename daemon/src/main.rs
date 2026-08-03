@@ -1060,16 +1060,27 @@ fn main() {
             if hint != SwitchHint::None || weak_rescue {
                 if last_scan.elapsed() > Duration::from_secs(scan_gap) || weak_rescue {
                     let _ = wpa.lock().unwrap().command("SCAN");
+                    let _ = std::process::Command::new("cmd")
+                        .args(["wifi", "start-scan"])
+                        .output();
                     thread::sleep(Duration::from_secs(2));
                     last_scan = Instant::now();
                 }
-                let scans = {
+                // wpa 结果常残缺；合并 cmd list-scan-results（家网 BSSID / 中文 SSID）
+                let wpa_scans = {
                     let w = wpa.lock().unwrap();
                     w.scan_results()
                         .ok()
                         .map(|r| parse_scan_results(&r))
                         .unwrap_or_default()
                 };
+                let cmd_scans = std::process::Command::new("cmd")
+                    .args(["wifi", "list-scan-results"])
+                    .output()
+                    .ok()
+                    .map(|o| parse_cmd_scan_results(&String::from_utf8_lossy(&o.stdout)))
+                    .unwrap_or_default();
+                let scans = merge_scan_aps(wpa_scans, cmd_scans);
                 let ssid = ssid_now;
                 let cur_bssid = bssid_now;
                 let cur_is_5g = band == "5";

@@ -188,23 +188,24 @@ impl StateMachine {
             return SwitchHint::None;
         }
 
-        if !on_preferred_band && score >= detect_th {
-            // 在非首选频段且健康度恢复 → 准备上切回首选
+        if !on_preferred_band {
+            // 上切：已在非首选（如 2.4）就应尝试回 5G。
+            // 旧逻辑要求 score>=detect(70) 才防抖 → 2.4 分数 50–69 时永远不上切（用户痛点）。
+            // 对端是否够好由主循环 best_on_band + upswitch_rssi_min 把关；这里只负责「待够防抖秒数」。
+            let _ = detect_th; // 上切不再用 detect 卡当前链路
             self.down_deb.reset();
-            if self
-                .up_deb
-                .push_and_ready(score, |m| m >= detect_th)
-            {
+            self.state = State::GradientDetect;
+            // 任意分数都推进上切防抖（极差时主循环会因无合格 peer 而空切）
+            if self.up_deb.push_and_ready(score, |_| true) {
                 self.up_deb.reset();
                 self.state = State::Switching;
                 return SwitchHint::Upswitch;
             }
-            self.state = State::GradientDetect;
             return SwitchHint::None;
         }
 
-        // 中间区域：仅梯度检测，不触发切换
-        self.state = State::GradientDetect;
+        // 首选频段且未跌破 switch：空闲
+        self.state = State::Idle;
         self.down_deb.reset();
         self.up_deb.reset();
         SwitchHint::None
