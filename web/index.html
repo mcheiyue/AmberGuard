@@ -401,7 +401,17 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
 </div>
 
 <script>
-const $ = (id) => document.getElementById(id);
+  const $ = (id) => document.getElementById(id);
+  function escHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+  function bandLabel(b) {
+    if (b === '5' || b === '5g' || b === '5G') return '5G';
+    if (b === '2.4' || b === '24' || b === '2.4G') return '2.4G';
+    return (b || '?') + '';
+  }
 let cfgCache = null;
 let dirty = false;
 
@@ -835,9 +845,9 @@ async function scanAps() {
       const row = document.createElement('label');
       row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);cursor:pointer';
       row.innerHTML =
-        '<input type="checkbox" data-bssid="' + key + '" data-ssid="' + (a.ssid || '').replace(/"/g, '&quot;') + '" data-band="' + (a.band || 'auto') + '"' + (checked ? ' checked' : '') + '>' +
+        '<input type="checkbox" data-bssid="' + key + '" data-ssid="' + escHtml(a.ssid || '') + '" data-band="' + (a.band || 'auto') + '"' + (checked ? ' checked' : '') + '>' +
         '<div style="flex:1;min-width:0">' +
-        '<div style="font-weight:600;word-break:break-all">' + (a.ssid || '(隐藏)') + ' · ' + (a.band || '?') + 'G</div>' +
+        '<div style="font-weight:600;word-break:break-all">' + escHtml(a.ssid || '(隐藏)') + ' · ' + bandLabel(a.band) + '</div>' +
         '<div style="color:var(--muted);font-family:var(--mono);font-size:11px">' + a.bssid + ' · ' + a.signal + ' dBm</div>' +
         '</div>';
       const cb = row.querySelector('input');

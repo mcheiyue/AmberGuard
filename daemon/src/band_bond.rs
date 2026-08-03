@@ -76,6 +76,143 @@ pub fn link_in_home(home: &[HomeAp], bssid: &str, ssid: &str) -> bool {
             .any(|h| !h.ssid.is_empty() && h.ssid == ssid)
 }
 
+/// wpa SCAN_RESULTS 常把中文等非 ASCII 编成 `\xNN` 字节转义
+pub fn decode_wpa_ssid(raw: &str) -> String {
+    if !raw.as_bytes().contains(&b'\\') {
+        return raw.to_string();
+    }
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'x' | b'X' if i + 3 < bytes.len() => {
+                    if let Ok(h) = std::str::from_utf8(&bytes[i + 2..i + 4]) {
+                        if let Ok(v) = u8::from_str_radix(h, 16) {
+                            out.push(v);
+                            i += 4;
+                            continue;
+                        }
+                    }
+                }
+                b'\\' => {
+                    out.push(b'\\');
+                    i += 2;
+                    continue;
+                }
+                b'"' => {
+                    out.push(b'"');
+                    i += 2;
+                    continue;
+                }
+                b'\'' => {
+                    out.push(b'\'');
+                    i += 2;
+                    continue;
+                }
+                b'e' => {
+                    out.push(0x1b);
+                    i += 2;
+                    continue;
+                }
+                b'n' => {
+                    out.push(b'\n');
+                    i += 2;
+                    continue;
+                }
+                b't' => {
+                    out.push(b'\t');
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    match String::from_utf8(out) {
+        Ok(s) => s,
+        Err(e) => String::from_utf8_lossy(&e.into_bytes()).into_owned(),
+    }
+}
+
+/// `cmd wifi list-scan-results`（UTF-8 中文 SSID，列对齐）
+pub fn parse_cmd_scan_results(raw: &str) -> Vec<ScanAp> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("BSSID") || line.starts_with("Wifi") {
+            continue;
+        }
+        // flags 以 [ 开头；之前：bssid freq rssi(复杂) age ssid…
+        let flags_at = match line.find('[') {
+            Some(i) => i,
+            None => continue,
+        };
+        let head = line[..flags_at].trim_end();
+        let mut toks = head.split_whitespace();
+        let Some(bssid) = toks.next() else { continue };
+        if bssid.len() < 11 || !bssid.contains(':') {
+            continue;
+        }
+        let Some(freq_s) = toks.next() else { continue };
+        let Some(rssi_tok) = toks.next() else { continue };
+        let _age = toks.next(); // 可能没有
+        // 剩余为 SSID（可含空格）；若 age 被当成 ssid 一部分——rssi 形如 -59 或 -59(0:-61/1:-65)
+        let rssi_s = rssi_tok.split('(').next().unwrap_or(rssi_tok);
+        let Ok(freq) = freq_s.parse::<u32>() else { continue };
+        let Ok(signal) = rssi_s.parse::<i32>() else { continue };
+        // 若第四段是纯数字/小数（Age），SSID 从第五段起；否则第四段起都是 SSID
+        let rest: Vec<&str> = toks.collect();
+        let ssid = if rest.is_empty() {
+            String::new()
+        } else if rest[0].chars().all(|c| c.is_ascii_digit() || c == '.') {
+            rest.get(1..).map(|s| s.join(" ")).unwrap_or_default()
+        } else {
+            rest.join(" ")
+        };
+        out.push(ScanAp {
+            bssid: bssid.to_string(),
+            freq,
+            signal,
+            ssid,
+        });
+    }
+    out
+}
+
+/// 合并扫描：同 BSSID 保留信号更好、SSID 非空者
+pub fn merge_scan_aps(a: Vec<ScanAp>, b: Vec<ScanAp>) -> Vec<ScanAp> {
+    let mut map: std::collections::HashMap<String, ScanAp> = std::collections::HashMap::new();
+    for ap in a.into_iter().chain(b) {
+        let key = ap.bssid.to_lowercase();
+        match map.get_mut(&key) {
+            None => {
+                map.insert(key, ap);
+            }
+            Some(old) => {
+                if old.ssid.is_empty() && !ap.ssid.is_empty() {
+                    old.ssid = ap.ssid.clone();
+                }
+                // 若旧的是 \x 未解码残留而新的是可读中文
+                if ap.ssid.chars().any(|c| c > '\u{7f}') && !old.ssid.chars().any(|c| c > '\u{7f}')
+                {
+                    old.ssid = ap.ssid.clone();
+                }
+                if ap.signal > old.signal {
+                    old.signal = ap.signal;
+                    old.freq = ap.freq;
+                }
+            }
+        }
+    }
+    let mut v: Vec<_> = map.into_values().collect();
+    v.sort_by(|x, y| y.signal.cmp(&x.signal));
+    v
+}
+
 /// 解析 wpa SCAN_RESULTS 文本
 pub fn parse_scan_results(raw: &str) -> Vec<ScanAp> {
     let mut out = Vec::new();
@@ -90,7 +227,8 @@ pub fn parse_scan_results(raw: &str) -> Vec<ScanAp> {
         let Some(freq_s) = parts.next() else { continue };
         let Some(sig_s) = parts.next() else { continue };
         let _flags = parts.next();
-        let ssid = parts.next().unwrap_or("").to_string();
+        let ssid_raw = parts.next().unwrap_or("");
+        let ssid = decode_wpa_ssid(ssid_raw);
         let Ok(freq) = freq_s.parse::<u32>() else { continue };
         let Ok(signal) = sig_s.parse::<i32>() else { continue };
         if bssid.len() < 11 {
@@ -278,7 +416,9 @@ pub fn parse_list_networks(raw: &str) -> Vec<(u32, String)> {
             continue;
         }
         if let Ok(id) = parts[0].parse::<u32>() {
-            out.push((id, parts[1].to_string()));
+            // SSID 字段也可能是 \x 转义
+            let ssid = decode_wpa_ssid(parts[1].trim_matches('"'));
+            out.push((id, ssid));
         }
     }
     out
@@ -290,4 +430,21 @@ pub fn network_id_for_ssid(list_raw: &str, ssid: &str) -> Option<u32> {
     list.iter()
         .find(|(_, s)| s == ssid)
         .map(|(id, _)| *id)
+}
+
+#[cfg(test)]
+mod ssid_decode_tests {
+    use super::decode_wpa_ssid;
+
+    #[test]
+    fn decodes_utf8_hex_escape() {
+        let raw = r"\xe6\xb5\xb7\xe5\xba\xb7";
+        let s = decode_wpa_ssid(raw);
+        assert!(s.contains('海'), "got {s:?}");
+    }
+
+    #[test]
+    fn plain_ascii_unchanged() {
+        assert_eq!(decode_wpa_ssid("MERCURY_C8B5"), "MERCURY_C8B5");
+    }
 }

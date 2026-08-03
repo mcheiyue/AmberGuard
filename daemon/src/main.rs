@@ -8,9 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::band_bond::{
-    best_on_band, dual_band_pair_saved, link_in_home, network_id_for_ssid, parse_list_networks,
-    parse_scan_results,
-    scan_views,
+    best_on_band, dual_band_pair_saved, link_in_home, merge_scan_aps, network_id_for_ssid,
+    parse_cmd_scan_results, parse_list_networks, parse_scan_results, scan_views,
 };
 use crate::config::{Config, ConfigPatch};
 use crate::health_score::health_score;
@@ -548,10 +547,33 @@ fn main() {
                             let w = wpa_http.lock().map_err(|e| e.to_string())?;
                             let _ = w.command("SCAN");
                         }
-                        thread::sleep(Duration::from_millis(1200));
-                        let w = wpa_http.lock().map_err(|e| e.to_string())?;
-                        let raw = w.scan_results().map_err(|e| e.to_string())?;
-                        let aps = parse_scan_results(&raw);
+                        // 框架扫描：中文 SSID 更完整
+                        let _ = std::process::Command::new("cmd")
+                            .args(["wifi", "start-scan"])
+                            .output();
+                        thread::sleep(Duration::from_millis(1500));
+                        let wpa_aps = {
+                            let w = wpa_http.lock().map_err(|e| e.to_string())?;
+                            let raw = w.scan_results().unwrap_or_default();
+                            parse_scan_results(&raw)
+                        };
+                        let cmd_aps = {
+                            let out = std::process::Command::new("cmd")
+                                .args(["wifi", "list-scan-results"])
+                                .output()
+                                .ok();
+                            out.and_then(|o| {
+                                if o.status.success() {
+                                    Some(parse_cmd_scan_results(&String::from_utf8_lossy(
+                                        &o.stdout,
+                                    )))
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_default()
+                        };
+                        let aps = merge_scan_aps(wpa_aps, cmd_aps);
                         Ok(scan_views(&aps, &home))
                     })();
                     match scan_res {
