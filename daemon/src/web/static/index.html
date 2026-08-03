@@ -245,7 +245,11 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       </div>
       <div class="card">
         <h2>最近切换</h2>
-        <div id="histList" class="hist-list">暂无</div>
+        <p class="note detail" style="margin-top:0">内存+落盘最近 20 条；重启仍保留。重置配置默认不清历史。</p>
+        <div class="btns" style="margin-top:6px">
+          <button type="button" onclick="clearHistory()">清空历史</button>
+        </div>
+        <div id="histList" class="hist-list" style="margin-top:8px">暂无</div>
       </div>
     </section>
 
@@ -327,7 +331,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       </div>
       <div class="card">
         <h2>关于</h2>
-        <div class="row"><span class="k">版本</span><span class="v" id="aboutVer">v0.5.0</span></div>
+        <div class="row"><span class="k">版本</span><span class="v" id="aboutVer">v0.5.8</span></div>
         <div class="row"><span class="k">面板</span><span class="v">127.0.0.1:8080</span></div>
         <div class="row"><span class="k">日志</span><span class="v" style="font-size:11px">/data/adb/amberguard/log/amberguard.log</span></div>
         <p class="note" style="margin-top:10px">
@@ -342,10 +346,12 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="btns">
           <button class="primary" type="button" onclick="scanAps()">扫描附近 AP</button>
           <button type="button" onclick="addCurrentHome()">当前加入</button>
+          <button type="button" onclick="adoptSuggestedHomes()">采纳建议对</button>
           <button type="button" onclick="saveHomeAps()">保存家网</button>
           <button type="button" onclick="clearHomeAps()">清空家网</button>
         </div>
-        <p class="note" id="homeSummary" style="margin-top:8px">已选 0 个</p>
+        <p class="note detail" style="margin-top:8px">「当前加入」= 只加当前 AP；「采纳建议对」= 写入扫描里同名双频（同 stem）预勾项。</p>
+        <p class="note" id="homeSummary" style="margin-top:4px">已选 0 个</p>
         <div id="scanList" style="margin-top:10px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--panel2);font-size:12px;display:none">
           <div id="scanItems"></div>
         </div>
@@ -615,6 +621,15 @@ function histResultClass(r) {
   return 'muted';
 }
 
+async function clearHistory() {
+  try {
+    await fetch('/api/history/clear', { method: 'POST', cache: 'no-store' });
+    loadHistory();
+  } catch (e) {
+    if ($('err')) $('err').textContent = e.message;
+  }
+}
+
 async function loadHistory() {
   try {
     const r = await fetch('/api/history', { cache: 'no-store' });
@@ -624,7 +639,7 @@ async function loadHistory() {
     const evs = j.events || [];
     if (!evs.length) { box.textContent = '暂无'; box.className = 'note'; return; }
     box.className = 'hist-list';
-    box.innerHTML = evs.slice(0, 10).map(e => {
+    box.innerHTML = evs.slice(0, 20).map(e => {
       const ts = fmtLocal(e.ts_unix);
       const fromB = e.from_band === '5' ? '5G' : (e.from_band === '2.4' ? '2.4G' : '');
       const toB = e.to_band === '5' ? '5G' : (e.to_band === '2.4' ? '2.4G' : '');
@@ -911,6 +926,8 @@ function updateHomeSummary() {
   if ($('homeSummary')) $('homeSummary').textContent = '已选 ' + n + ' 个家网 AP' + (n ? '（保存后生效）' : '（未配置则用启发式）');
 }
 
+let lastScanList = [];
+
 async function scanAps() {
   $('scanErr').textContent = '';
   $('scanMsg').textContent = '扫描中…';
@@ -919,17 +936,31 @@ async function scanAps() {
     const j = await r.json();
     if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
     const list = j.aps || [];
+    lastScanList = list;
     const items = $('scanItems');
     items.innerHTML = '';
+    let sugN = 0;
+    const homeWasEmpty = Object.keys(homeSelected).length === 0;
+    if (homeWasEmpty) {
+      for (const a of list) {
+        if (!a.suggested || !a.bssid) continue;
+        const k = String(a.bssid).toLowerCase();
+        homeSelected[k] = { bssid: a.bssid, ssid: a.ssid || '', band: a.band || 'auto' };
+      }
+    }
     for (const a of list) {
       const key = (a.bssid || '').toLowerCase();
+      const sug = !!a.suggested;
+      if (sug) sugN++;
       const checked = !!homeSelected[key];
       const row = document.createElement('label');
-      row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);cursor:pointer';
+      row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);cursor:pointer' +
+        (sug ? ';background:rgba(245,158,11,.08)' : '');
       row.innerHTML =
         '<input type="checkbox" data-bssid="' + key + '" data-ssid="' + escHtml(a.ssid || '') + '" data-band="' + (a.band || 'auto') + '"' + (checked ? ' checked' : '') + '>' +
         '<div style="flex:1;min-width:0">' +
-        '<div style="font-weight:600;word-break:break-all">' + escHtml(a.ssid || '(隐藏)') + ' · ' + bandLabel(a.band) + '</div>' +
+        '<div style="font-weight:600;word-break:break-all">' + escHtml(a.ssid || '(隐藏)') + ' · ' + bandLabel(a.band) +
+        (sug ? ' <span style="color:var(--amber);font-weight:500">建议</span>' : '') + '</div>' +
         '<div style="color:var(--muted);font-family:var(--mono);font-size:11px">' + a.bssid + ' · ' + a.signal + ' dBm</div>' +
         '</div>';
       const cb = row.querySelector('input');
@@ -941,10 +972,38 @@ async function scanAps() {
       items.appendChild(row);
     }
     $('scanList').style.display = 'block';
-    $('scanMsg').textContent = '扫到 ' + list.length + ' 个，勾选后点「保存家网」';
+    $('scanMsg').textContent = '扫到 ' + list.length + ' 个' +
+      (sugN ? '，其中 ' + sugN + ' 个同 stem 双频建议对（可点「采纳建议对」）' : '，勾选后点「保存家网」');
     updateHomeSummary();
   } catch (e) {
     $('scanMsg').textContent = '';
+    $('scanErr').textContent = e.message;
+  }
+}
+
+async function adoptSuggestedHomes() {
+  $('scanErr').textContent = '';
+  try {
+    let list = lastScanList;
+    if (!list.length) {
+      const r = await fetch('/api/scan', { method: 'POST', cache: 'no-store' });
+      const j = await r.json();
+      if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+      list = j.aps || [];
+      lastScanList = list;
+    }
+    let n = 0;
+    for (const a of list) {
+      if (!a.suggested || !a.bssid) continue;
+      const key = String(a.bssid).toLowerCase();
+      homeSelected[key] = { bssid: a.bssid, ssid: a.ssid || '', band: a.band || 'auto' };
+      n++;
+    }
+    if (!n) throw new Error('没有建议对：请先扫描，且需同 stem 同时有 2.4 与 5');
+    await saveHomeAps();
+    updateHomeSummary();
+    $('scanMsg').textContent = '已采纳建议对 ' + n + ' 个 AP 并保存';
+  } catch (e) {
     $('scanErr').textContent = e.message;
   }
 }

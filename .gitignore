@@ -5,6 +5,8 @@ Cargo.lock
 # Module staging
 module_staging/
 out/
+zip_root/
+jniLibs/
 
 # IDE
 .vscode/
@@ -16,5 +18,16 @@ out/
 .DS_Store
 Thumbs.db
 
-# Packed module
+# Packed module（允许本机保留 dist 下正式包名，忽略调试产物）
 *.zip
+dist/probe*
+dist/deploy_*
+dist/ci_*
+dist/_*/
+dist/module_staging/
+dist/**/*.sh
+!dist/AmberGuard-v*.zip
+
+# 本地 adb/调试杂物
+*.log
+*.tmp

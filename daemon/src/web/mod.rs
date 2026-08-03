@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusSnapshot {
@@ -53,7 +53,7 @@ pub struct ThresholdsView {
 }
 
 /// 切换历史一条
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwitchEvent {
     pub ts_unix: u64,
     pub from_ssid: String,

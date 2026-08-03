@@ -20,13 +20,36 @@ use crate::station_info::{iw_station_dump, parse_iw_station, retry_rate, Station
 use crate::web::{Readiness, ReadyStep, StatusSnapshot, SwitchEvent, ThresholdsView};
 use crate::wpa_ctrl::WpaCtrl;
 
-const HISTORY_CAP: usize = 10;
+const HISTORY_CAP: usize = 20;
+const HISTORY_PATH: &str = "/data/adb/amberguard/history.json";
 
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+fn load_history() -> VecDeque<SwitchEvent> {
+    let mut q = VecDeque::with_capacity(HISTORY_CAP);
+    let Ok(raw) = std::fs::read_to_string(HISTORY_PATH) else {
+        return q;
+    };
+    let Ok(list) = serde_json::from_str::<Vec<SwitchEvent>>(&raw) else {
+        return q;
+    };
+    for ev in list.into_iter().take(HISTORY_CAP) {
+        q.push_back(ev);
+    }
+    q
+}
+
+fn save_history(hist: &VecDeque<SwitchEvent>) {
+    let list: Vec<&SwitchEvent> = hist.iter().collect();
+    if let Ok(s) = serde_json::to_string(&list) {
+        let _ = std::fs::create_dir_all("/data/adb/amberguard");
+        let _ = std::fs::write(HISTORY_PATH, s);
+    }
 }
 
 /// 运行模式中文
@@ -207,6 +230,7 @@ fn push_history(hist: &Arc<Mutex<VecDeque<SwitchEvent>>>, ev: SwitchEvent) {
         while h.len() > HISTORY_CAP {
             h.pop_back();
         }
+        save_history(&h);
     }
 }
 
@@ -379,7 +403,7 @@ fn main() {
     // 手动切网保护截止时间；HTTP 可 clear / soft-pause
     let hold_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let history: Arc<Mutex<VecDeque<SwitchEvent>>> =
-        Arc::new(Mutex::new(VecDeque::with_capacity(HISTORY_CAP)));
+        Arc::new(Mutex::new(load_history()));
     let mut sm = StateMachine::new();
     let mut power = PowerStateManager::new();
 
@@ -411,6 +435,13 @@ fn main() {
                     let list: Vec<&SwitchEvent> = h.iter().collect();
                     let body = serde_json::json!({ "ok": true, "events": list });
                     json_resp(body.to_string(), StatusCode(200))
+                }
+                (Method::Post, "/api/history/clear") | (Method::Get, "/api/history/clear") => {
+                    if let Ok(mut h) = history_http.lock() {
+                        h.clear();
+                        save_history(&h);
+                    }
+                    json_resp(r#"{"ok":true}"#.into(), StatusCode(200))
                 }
                 (Method::Get, "/api/readiness") => {
                     let c = config_http.lock().unwrap();
@@ -792,7 +823,11 @@ fn main() {
 
     let mut last_scan = Instant::now() - Duration::from_secs(60);
     let mut prev_station = StationSample::default();
-                // 链路键 ssid|bssid；daemon 自切后短暂忽略变更（含失败尝试后的回弹）
+    // iw 采样节流：息屏不采；空闲 ≥3s；观察/防抖 1s
+    let mut last_iw_at = Instant::now() - Duration::from_secs(10);
+    let mut cached_retry: Option<f32> = None;
+    let mut cached_tx_delta: u64 = 0;
+    // 链路键 ssid|bssid；daemon 自切后短暂忽略变更（含失败尝试后的回弹）
     let mut prev_link_key = String::new();
     let mut suppress_link_change_until: Option<Instant> = None;
     // 切后短锁 BSSID，防 band-steering 踢回
@@ -971,17 +1006,39 @@ fn main() {
                 prev_link_key = link_key;
             }
 
-            let (retry_opt, tx_delta) = match iw_station_dump(&iface) {
-                Ok(raw) => {
-                    let cur = parse_iw_station(&raw);
-                    let rate = retry_rate(&prev_station, &cur);
-                    let delta = cur.tx_packets.saturating_sub(prev_station.tx_packets);
-                    prev_station = cur;
-                    (rate, delta)
-                }
-                Err(e) => {
-                    log::debug!("iw station dump: {e}");
-                    (None, 0)
+            // 采样矩阵（刀5）：息屏跳过 iw；亮屏空闲 3s；观察带/切换中 1s
+            let (retry_opt, tx_delta) = if screen_off {
+                (cached_retry, 0)
+            } else {
+                let iw_gap_secs: u64 = if observing
+                    || matches!(
+                        sm.state,
+                        crate::state_machine::State::GradientDetect
+                            | crate::state_machine::State::Switching
+                    ) {
+                    1
+                } else {
+                    3
+                };
+                if last_iw_at.elapsed() < Duration::from_secs(iw_gap_secs) {
+                    (cached_retry, cached_tx_delta)
+                } else {
+                    last_iw_at = Instant::now();
+                    match iw_station_dump(&iface) {
+                        Ok(raw) => {
+                            let cur = parse_iw_station(&raw);
+                            let rate = retry_rate(&prev_station, &cur);
+                            let delta = cur.tx_packets.saturating_sub(prev_station.tx_packets);
+                            prev_station = cur;
+                            cached_retry = rate;
+                            cached_tx_delta = delta;
+                            (rate, delta)
+                        }
+                        Err(e) => {
+                            log::debug!("iw station dump: {e}");
+                            (cached_retry, cached_tx_delta)
+                        }
+                    }
                 }
             };
 

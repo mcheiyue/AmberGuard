@@ -380,6 +380,9 @@ pub struct ScanApView {
     pub signal: i32,
     pub band: String,
     pub in_home: bool,
+    /// 同 stem 且同时可见 2.4+5 → 建议纳入家网对
+    #[serde(default)]
+    pub suggested: bool,
 }
 
 pub fn scan_views(scans: &[ScanAp], home: &[HomeAp]) -> Vec<ScanApView> {
@@ -392,10 +395,46 @@ pub fn scan_views(scans: &[ScanAp], home: &[HomeAp]) -> Vec<ScanApView> {
             signal: a.signal,
             band: if a.is_5g() { "5" } else { "2.4" }.into(),
             in_home: home_contains(home, &a.bssid),
+            suggested: false,
         })
         .collect();
+    mark_suggested_stem_pairs(&mut v);
     v.sort_by(|a, b| b.signal.cmp(&a.signal));
     v
+}
+
+/// 同 ssid_stem 下同时有 2.4 与 5 → 整组标 suggested（供面板预勾 / 一键采纳）
+pub fn mark_suggested_stem_pairs(views: &mut [ScanApView]) {
+    use std::collections::HashMap;
+    // stem -> (has_24, has_5, indices)
+    let mut groups: HashMap<String, (bool, bool, Vec<usize>)> = HashMap::new();
+    for (i, a) in views.iter().enumerate() {
+        if a.ssid.is_empty() {
+            continue;
+        }
+        let stem = ssid_stem(&a.ssid);
+        if stem.is_empty() {
+            continue;
+        }
+        let is5 = a.band == "5" || a.freq > 5000;
+        let e = groups.entry(stem).or_insert((false, false, Vec::new()));
+        if is5 {
+            e.1 = true;
+        } else {
+            e.0 = true;
+        }
+        e.2.push(i);
+    }
+    for (_stem, (has24, has5, idxs)) in groups {
+        if !(has24 && has5) {
+            continue;
+        }
+        for i in idxs {
+            if let Some(v) = views.get_mut(i) {
+                v.suggested = true;
+            }
+        }
+    }
 }
 
 /// 解析 LIST_NETWORKS，返回 (id, ssid)（兼容 tab / 多空格）
@@ -434,7 +473,7 @@ pub fn network_id_for_ssid(list_raw: &str, ssid: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod ssid_decode_tests {
-    use super::decode_wpa_ssid;
+    use super::{decode_wpa_ssid, mark_suggested_stem_pairs, ScanApView};
 
     #[test]
     fn decodes_utf8_hex_escape() {
@@ -446,5 +485,41 @@ mod ssid_decode_tests {
     #[test]
     fn plain_ascii_unchanged() {
         assert_eq!(decode_wpa_ssid("MERCURY_C8B5"), "MERCURY_C8B5");
+    }
+
+    #[test]
+    fn suggests_stem_dual_band_pair() {
+        let mut v = vec![
+            ScanApView {
+                bssid: "aa:aa:aa:aa:aa:01".into(),
+                ssid: "MERCURY_C8B5".into(),
+                freq: 2412,
+                signal: -50,
+                band: "2.4".into(),
+                in_home: false,
+                suggested: false,
+            },
+            ScanApView {
+                bssid: "aa:aa:aa:aa:aa:02".into(),
+                ssid: "MERCURY_5G_C8B5".into(),
+                freq: 5180,
+                signal: -55,
+                band: "5".into(),
+                in_home: false,
+                suggested: false,
+            },
+            ScanApView {
+                bssid: "bb:bb:bb:bb:bb:01".into(),
+                ssid: "OTHER".into(),
+                freq: 2412,
+                signal: -40,
+                band: "2.4".into(),
+                in_home: false,
+                suggested: false,
+            },
+        ];
+        mark_suggested_stem_pairs(&mut v);
+        assert!(v[0].suggested && v[1].suggested);
+        assert!(!v[2].suggested);
     }
 }
