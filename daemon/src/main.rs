@@ -253,15 +253,27 @@ fn main() {
                     match Config::init_if_missing() {
                         Ok(written) => {
                             if written {
-                                // 重载配置
                                 if let Ok(mut c) = config_http.lock() {
                                     let _ = c.reload();
+                                    // 同步快照阈值
+                                    if let Ok(mut s) = snapshot_http.lock() {
+                                        s.thresholds = ThresholdsView {
+                                            score_detect_threshold: c.score_detect_threshold,
+                                            score_switch_threshold: c.score_switch_threshold,
+                                            upswitch_rssi_min_dbm: c.upswitch_rssi_min_dbm,
+                                            mode: c.mode.clone(),
+                                        };
+                                        s.user_hold_secs = c.user_hold_secs;
+                                    }
                                 }
-                                log::info!("配置初始化完成");
-                                json_resp("{\"ok\":true,\"initialized\":true}".into(), StatusCode(200))
-                            } else {
-                                json_resp("{\"ok\":true,\"initialized\":false}".into(), StatusCode(200))
+                                log::info!("配置初始化完成（已落盘日用默认）");
                             }
+                            let body = serde_json::json!({
+                                "ok": true,
+                                "initialized": written,
+                                "persisted": Config::is_persisted(),
+                            });
+                            json_resp(body.to_string(), StatusCode(200))
                         }
                         Err(e) => json_resp(
                             format!("{{\"ok\":false,\"error\":\"{e}\"}}"),

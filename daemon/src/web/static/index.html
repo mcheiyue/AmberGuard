@@ -197,10 +197,18 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="row"><span class="k">守护</span><span class="v" id="sm" title="">—</span></div>
         <p class="err" id="err"></p>
       </div>
-      <div class="card" id="initCard">
+      <div class="card" id="initCard" style="display:none">
         <h2>开始配置</h2>
-        <p class="note detail" style="margin-top:0">首次使用 AmberGuard？点此初始化默认配置，即可直接使用。</p>
-        <button onclick="showInitModal()" class="primary" style="width:100%">初始化配置（日用默认）</button>
+        <p class="note" style="margin-top:0">尚未保存配置。将写入<strong>日用默认</strong>（自动切换、弱信号关闭）。双路由/Mesh 请再去「设置」扫描勾选家网。</p>
+        <div class="btns" style="flex-direction:column">
+          <button type="button" class="primary" style="width:100%" onclick="doInit(false)">初始化并开始</button>
+          <button type="button" style="width:100%" onclick="doInit(true)">初始化并去配置家网</button>
+        </div>
+      </div>
+      <div class="card" id="homeTipCard" style="display:none">
+        <h2>家网未配置</h2>
+        <p class="note" style="margin-top:0">已在运行，但未勾选家网 AP。多路由环境下可能切到信号最强但非预期的热点。</p>
+        <button type="button" class="primary" style="width:100%" onclick="tab('set');scanAps()">去设置扫描家网</button>
       </div>
       <div class="card">
         <h2>模式</h2>
@@ -500,44 +508,55 @@ function renderFields(api) {
   if (api.config && api.config.log_level) {
     $('logLevel').value = api.config.log_level;
   }
+  const homeN = (api.config && api.config.home_aps) ? api.config.home_aps.length : 0;
+  updateGuideCards(!!api.persisted, homeN);
+  syncSettingsForm();
 }
 
-function showInitModal() {
-  if (confirm("初始化默认配置：\n• 阈值设为日用标准\n• 日志级别为 info\n• 模式为自动切换\n\n配置已存在于 /data/adb/amberguard/config.toml\n确认执行？")) {
-    const btn = document.querySelector('#initCard .primary');
-    if (btn) { btn.disabled = true; btn.textContent = '初始化中…'; }
-    fetch('/api/init-config', { method: 'POST', cache: 'no-store' })
-      .then(r => r.json())
-      .then(j => {
-        if (j.initialized) {
-          alert('✓ 配置已初始化为日用默认值，可以开始使用了。\n可在「阈值」页微调，也可随时恢复默认。');
-        } else {
-          alert('配置已存在，无需再次初始化。\n可直接使用或到「阈值」页调整。');
-        }
-        loadConfig();
-        // 隐藏引导卡
-        const card = document.getElementById('initCard');
-        if (card) card.style.display = 'none';
-      })
-      .catch(e => {
-        alert('初始化失败: ' + e.message);
-        if (btn) { btn.disabled = false; btn.textContent = '初始化配置（日用默认）'; }
-      });
+async function doInit(goHome) {
+  const btns = document.querySelectorAll('#initCard button');
+  btns.forEach(b => { b.disabled = true; });
+  try {
+    const r = await fetch('/api/init-config', { method: 'POST', cache: 'no-store' });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    await loadConfig();
+    updateGuideCards(j.persisted !== false, (cfgCache && cfgCache.config && (cfgCache.config.home_aps || []).length) || 0);
+    if (j.initialized) {
+      $('err').textContent = '';
+    }
+    if (goHome) {
+      tab('set');
+      scanAps();
+    } else {
+      tick();
+    }
+  } catch (e) {
+    $('err').textContent = '初始化失败: ' + e.message;
+  } finally {
+    btns.forEach(b => { b.disabled = false; });
   }
 }
 
-// 页面加载时检查配置：若 /api/config 返回异常则显示引导
+function updateGuideCards(persisted, homeCount) {
+  const initCard = $('initCard');
+  const homeTip = $('homeTipCard');
+  if (initCard) initCard.style.display = persisted ? 'none' : 'block';
+  // 已落盘且无家网：轻提示（初始化卡优先）
+  if (homeTip) {
+    homeTip.style.display = (persisted && homeCount === 0) ? 'block' : 'none';
+  }
+}
+
 async function checkInit() {
   try {
     const r = await fetch('/api/config', { cache: 'no-store' });
     const j = await r.json();
-    if (j.config && j.config.score_detect_threshold) {
-      // 配置正常，隐藏引导卡
-      const card = document.getElementById('initCard');
-      if (card) card.style.display = 'none';
-    }
+    const homeN = (j.config && j.config.home_aps) ? j.config.home_aps.length : 0;
+    updateGuideCards(!!j.persisted, homeN);
   } catch (e) {
-    // 离线，引导卡保持可见
+    // 离线：显示初始化卡便于感知
+    updateGuideCards(false, 0);
   }
 }
 
@@ -851,6 +870,16 @@ async function tick() {
     if (j.user_hold_secs != null && $('holdSecs') && document.activeElement !== $('holdSecs')) {
       $('holdSecs').value = j.user_hold_secs;
       $('holdSecsVal').textContent = j.user_hold_secs;
+    }
+    // 家网轻提示（已持久化时）
+    if ($('initCard') && $('initCard').style.display !== 'block') {
+      const hc = j.home_ap_count || 0;
+      if ($('homeTipCard')) {
+        // 仅当引导卡未显示；persisted 由 checkInit/loadConfig 控制，这里用 home 数刷新
+        if (cfgCache && cfgCache.persisted) {
+          $('homeTipCard').style.display = hc === 0 ? 'block' : 'none';
+        }
+      }
     }
     if (!dirty && j.thresholds && cfgCache) {
       const t = j.thresholds;

@@ -189,6 +189,8 @@ pub struct ConfigApiResponse {
     pub fields: Vec<FieldMeta>,
     pub presets: Vec<PresetMeta>,
     pub tips: Vec<&'static str>,
+    /// 是否已有 config.toml（false=新用户，应显示引导）
+    pub persisted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -412,6 +414,7 @@ impl Config {
             fields: Self::field_meta(),
             presets: Self::presets(),
             tips: Self::tips(),
+            persisted: Self::is_persisted(),
         }
     }
 
@@ -423,28 +426,30 @@ impl Config {
         PathBuf::from(DEV_CONFIG_PATH)
     }
 
+    /// 磁盘上是否已有配置文件（引导用；load 缺省时不落盘）
+    pub fn is_persisted() -> bool {
+        Self::resolve_path().exists()
+    }
+
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::resolve_path();
         if !path.exists() {
-            let cfg = Self::default();
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if let Err(e) = cfg.save_to(&path) {
-                log::warn!("写入默认配置失败 {}: {e}，使用内存默认", path.display());
-            }
-            return Ok(cfg);
+            // ponytail: 不自动写盘，便于 Web 新用户引导；点初始化/保存再落盘
+            log::info!(
+                "配置文件不存在 {}，使用内存默认（未落盘）",
+                path.display()
+            );
+            return Ok(Self::default());
         }
         let text = fs::read_to_string(&path)?;
-        let mut cfg: Config = toml::from_str(&text)?;
-        let _ = cfg.validate(); // 旧文件若不合理，仍加载但日志
+        let cfg: Config = toml::from_str(&text)?;
         if let Err(e) = cfg.validate() {
             log::warn!("配置校验警告: {e}（将尽量运行）");
         }
         Ok(cfg)
     }
 
-    /// 配置不存在时写入默认（Web 引导用）
+    /// 配置不存在时写入默认（Web 引导用）。已存在则 false。
     pub fn init_if_missing() -> Result<bool, ConfigError> {
         let path = Self::resolve_path();
         if path.exists() {
@@ -454,6 +459,11 @@ impl Config {
         cfg.save_to(&path)?;
         log::info!("已写入默认配置 {}", path.display());
         Ok(true)
+    }
+
+    /// 强制把当前内存配置落盘（初始化并开始 / 保存）
+    pub fn persist(&self) -> Result<(), ConfigError> {
+        self.save()
     }
 
     /// 从 config.toml 重新加载
