@@ -195,8 +195,11 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="row" style="margin-top:10px"><span class="k">网络名</span><span class="v" id="ssid">—</span></div>
         <div class="row"><span class="k">连接</span><span class="v" id="wpa_state" title="">—</span></div>
         <div class="row"><span class="k">守护</span><span class="v" id="sm" title="">—</span></div>
+        <div class="row"><span class="k">阈值对照</span><span class="v" id="thLines" style="font-size:12px;text-align:right">—</span></div>
+        <div class="row"><span class="k">5G 最强</span><span class="v" id="best5g">—</span></div>
         <p class="err" id="err"></p>
         <p class="note" id="reasonBar" style="display:none;margin:8px 0 0;color:var(--warn)"></p>
+        <p class="note" id="thHint" style="margin:8px 0 0;line-height:1.45"></p>
       </div>
       <div class="card" id="readyCard" style="display:none">
         <h2>上手检查</h2>
@@ -238,8 +241,11 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
     <!-- 阈值 -->
     <section class="page" id="p-cfg">
       <div class="card">
-        <h2>阈值档 · 热更新</h2>
-        <p class="note detail" style="margin-top:0">只改三个分数/RSSI，不改「运行模式」。可与日用/省电任意组合。</p>
+        <h2>阈值 · 热更新</h2>
+        <p class="note detail" style="margin-top:0">
+          <strong>优先级：</strong>① 下切线（健康分，离开 5G）→ ② 上切线（5G 最低 RSSI，回 5G）→ ③ 观察线（只观察/加扫，不单独切网）。
+          健康分≈半信号+半重传。改完回「状态」看「阈值对照 / 5G 最强」是否跟着变。
+        </p>
         <p class="note detail" style="margin-top:0">先选预设再微调。改完点保存即写入 config.toml。</p>
         <div class="btns" id="presets"></div>
         <div id="fields"></div>
@@ -1000,6 +1006,30 @@ async function tick() {
       else { rb.style.display = 'none'; rb.textContent = ''; }
     }
     if (j.thresholds && j.thresholds.mode) highlightMode(j.thresholds.mode);
+    const th = j.thresholds || {};
+    const thEl = $('thLines');
+    if (thEl) {
+      thEl.innerHTML =
+        '下切 <b>' + (th.score_switch_threshold ?? '—') + '</b> · 观察 <b>' +
+        (th.score_detect_threshold ?? '—') + '</b> · 上切5G≥ <b>' +
+        (th.upswitch_rssi_min_dbm ?? '—') + '</b> dBm';
+    }
+    const b5 = $('best5g');
+    if (b5) {
+      if (j.best_5g_rssi != null) {
+        const need = th.upswitch_rssi_min_dbm;
+        const ok = (need == null) || (j.best_5g_rssi >= need);
+        b5.textContent = j.best_5g_rssi + ' dBm' + (ok ? '（达上切线）' : '（未达上切线）');
+        b5.style.color = ok ? 'var(--ok)' : 'var(--warn)';
+      } else {
+        b5.textContent = '未扫描到家网 5G';
+        b5.style.color = 'var(--muted)';
+      }
+    }
+    const thh = $('thHint');
+    if (thh) {
+      thh.textContent = j.threshold_hint || '';
+    }
     const holdRem = j.hold_remaining_secs || 0;
     const ban = $('holdBanner');
     if (holdRem > 0) {

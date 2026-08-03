@@ -156,8 +156,12 @@ impl StateMachine {
         }
     }
 
-    /// 根据健康度推进；返回是否应尝试下切 / 上切
-    /// 下切仅当在首选频段（5G→2.4G），上切仅当在非首选频段（2.4G→5G）
+    /// 根据健康度推进；返回是否应尝试下切 / 上切。
+    ///
+    /// **优先级（与阈值页一致）**
+    /// 1. 下切线 `switch_th`（健康分）：仅在首选频段，score 持续 < switch → Downswitch  
+    /// 2. 上切不看当前健康分硬门：非首选频段防抖满 → Upswitch（对端 RSSI 由主循环把关）  
+    /// 3. 观察线 `detect_th`（健康分）：首选上 switch≤score<detect → 仅 GradientDetect（更勤扫描由主循环）
     pub fn on_score(
         &mut self,
         score: f32,
@@ -174,40 +178,42 @@ impl StateMachine {
             return SwitchHint::None;
         }
 
-        if on_preferred_band && score < switch_th {
-            // 在首选频段且健康度跌破切换阈值 → 准备下切到非首选
-            self.state = State::GradientDetect;
-            if self
-                .down_deb
-                .push_and_ready(score, |m| m < switch_th)
-            {
-                self.down_deb.reset();
-                self.state = State::Switching;
-                return SwitchHint::Downswitch;
+        // —— 首选频段（通常 5G）：三区间 ——
+        //   score >= detect     → Idle（稳）
+        //   switch <= score < detect → 观察（不切）
+        //   score < switch      → 下切防抖
+        if on_preferred_band {
+            self.up_deb.reset();
+            if score < switch_th {
+                self.state = State::GradientDetect;
+                if self
+                    .down_deb
+                    .push_and_ready(score, |m| m < switch_th)
+                {
+                    self.down_deb.reset();
+                    self.state = State::Switching;
+                    return SwitchHint::Downswitch;
+                }
+                return SwitchHint::None;
             }
-            return SwitchHint::None;
-        }
-
-        if !on_preferred_band {
-            // 上切：已在非首选（如 2.4）就应尝试回 5G。
-            // 旧逻辑要求 score>=detect(70) 才防抖 → 2.4 分数 50–69 时永远不上切（用户痛点）。
-            // 对端是否够好由主循环 best_on_band + upswitch_rssi_min 把关；这里只负责「待够防抖秒数」。
-            let _ = detect_th; // 上切不再用 detect 卡当前链路
             self.down_deb.reset();
-            self.state = State::GradientDetect;
-            // 任意分数都推进上切防抖（极差时主循环会因无合格 peer 而空切）
-            if self.up_deb.push_and_ready(score, |_| true) {
-                self.up_deb.reset();
-                self.state = State::Switching;
-                return SwitchHint::Upswitch;
+            if score < detect_th {
+                self.state = State::GradientDetect;
+                return SwitchHint::None;
             }
+            self.state = State::Idle;
             return SwitchHint::None;
         }
 
-        // 首选频段且未跌破 switch：空闲
-        self.state = State::Idle;
+        // —— 非首选（通常 2.4）：上切防抖；对端质量不在这里判 ——
         self.down_deb.reset();
-        self.up_deb.reset();
+        self.state = State::GradientDetect;
+        if self.up_deb.push_and_ready(score, |_| true) {
+            self.up_deb.reset();
+            self.state = State::Switching;
+            return SwitchHint::Upswitch;
+        }
+        let _ = detect_th;
         SwitchHint::None
     }
 

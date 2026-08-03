@@ -8,8 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::band_bond::{
-    best_on_band, dual_band_pair_saved, link_in_home, merge_scan_aps, network_id_for_ssid,
-    parse_cmd_scan_results, parse_list_networks, parse_scan_results, scan_views,
+    best_on_band, dual_band_pair_saved, home_contains, link_in_home, merge_scan_aps,
+    network_id_for_ssid, parse_cmd_scan_results, parse_list_networks, parse_scan_results,
+    scan_views,
 };
 use crate::config::{Config, ConfigPatch};
 use crate::health_score::health_score;
@@ -63,6 +64,47 @@ fn band_zh(band: &str) -> &'static str {
         "5" => "5G",
         "2.4" => "2.4G",
         _ => "未知频段",
+    }
+}
+
+/// 状态页「阈值对照」人话：调三个阈值后应能直接读到差异
+fn threshold_hint_zh(
+    on_preferred: bool,
+    score: f32,
+    rssi: i32,
+    switch_th: f32,
+    detect_th: f32,
+    up_rssi: i32,
+    best_5g: Option<i32>,
+) -> String {
+    if on_preferred {
+        // 5G：三区间
+        if score < switch_th {
+            format!(
+                "5G 下切带：分 {score:.0} < 下切线 {switch_th:.0}（信号 {rssi} dBm）→ 防抖后切 2.4"
+            )
+        } else if score < detect_th {
+            format!(
+                "5G 观察带：下切线 {switch_th:.0} ≤ 分 {score:.0} < 观察线 {detect_th:.0} → 加勤扫描、暂不切"
+            )
+        } else {
+            format!(
+                "5G 稳定带：分 {score:.0} ≥ 观察线 {detect_th:.0}（信号 {rssi} dBm）→ 守护中"
+            )
+        }
+    } else {
+        // 2.4：上切看对端 RSSI
+        match best_5g {
+            Some(b) if b >= up_rssi => format!(
+                "2.4 上切就绪：家网 5G 最强 {b} dBm ≥ 上切线 {up_rssi} → 防抖后回 5G"
+            ),
+            Some(b) => format!(
+                "2.4 等待 5G：最强 {b} dBm < 上切线 {up_rssi}（再靠近或下调上切线）"
+            ),
+            None => format!(
+                "2.4 寻找 5G：需家网 5G ≥ {up_rssi} dBm（尚未扫到合格 AP）"
+            ),
+        }
     }
 }
 
@@ -740,6 +782,8 @@ fn main() {
 
     let mut weak_bad_since: Option<Instant> = None;
     let mut weak_disconnected = false;
+    /// 最近扫描到的家网 5G 最强 RSSI（供阈值对照）
+    let mut cached_best_5g: Option<i32> = None;
 
     loop {
         let (
@@ -797,11 +841,23 @@ fn main() {
         let bssid_locked = lock_bssid_until
             .map(|t| Instant::now() < t)
             .unwrap_or(false);
-        // eco / 息屏：SCAN 更稀
-        let scan_gap = if screen_off {
+        // 扫描间隔：息屏最稀；观察带（分<观察线）更勤 —— 用户调「观察线」应能感到扫/反应变化
+        let prev_score = snapshot
+            .lock()
+            .ok()
+            .map(|s| s.score)
+            .unwrap_or(50.0);
+        let observing = prev_score < detect_th;
+        let scan_gap: u64 = if screen_off {
             60
         } else if eco {
-            30
+            if observing {
+                12
+            } else {
+                30
+            }
+        } else if observing {
+            8
         } else {
             15
         };
@@ -907,7 +963,17 @@ fn main() {
             let in_home_now = link_in_home(&home_aps, &bssid_now, &ssid_now);
             let pen_rem = sm.penalty_remaining_secs();
 
-            // 中文原因条
+            let th_hint = threshold_hint_zh(
+                on_preferred,
+                score,
+                rssi,
+                switch_th,
+                detect_th,
+                up_rssi,
+                cached_best_5g,
+            );
+
+            // 中文原因条（阻塞 > 阈值对照提示）
             let block_reason = if paused {
                 "已暂停守护".to_string()
             } else if hold_rem_now > 0 {
@@ -927,7 +993,8 @@ fn main() {
             } else if !Config::is_persisted() {
                 "配置未落盘（可用默认运行）".to_string()
             } else {
-                String::new()
+                // 无硬阻塞时，把阈值对照放到原因条，调参立刻可见
+                th_hint.clone()
             };
 
             {
@@ -943,6 +1010,8 @@ fn main() {
                 s.home_ap_count = home_aps.len();
                 s.in_home = in_home_now;
                 s.block_reason = block_reason.clone();
+                s.threshold_hint = th_hint.clone();
+                s.best_5g_rssi = cached_best_5g;
                 s.penalty_remaining_secs = pen_rem;
                 s.screen = if screen_off { "OFF" } else { "ON" }.into();
                 s.thresholds = ThresholdsView {
@@ -1081,6 +1150,12 @@ fn main() {
                     .map(|o| parse_cmd_scan_results(&String::from_utf8_lossy(&o.stdout)))
                     .unwrap_or_default();
                 let scans = merge_scan_aps(wpa_scans, cmd_scans);
+                // 更新家网 5G 最强（不论是否达标），供面板对照上切线
+                cached_best_5g = scans
+                    .iter()
+                    .filter(|a| a.is_5g() && (home_aps.is_empty() || home_contains(&home_aps, &a.bssid)))
+                    .map(|a| a.signal)
+                    .max();
                 let ssid = ssid_now;
                 let cur_bssid = bssid_now;
                 let cur_is_5g = band == "5";
@@ -1402,11 +1477,35 @@ fn main() {
                             snap.power_state = "WEAK_OFF".into();
                         }
                     } else {
-                        log::info!(
-                            "switch {:?}: no bonded peer (ssid={ssid}, bonds={})",
-                            hint,
-                            bonds.len()
-                        );
+                        let why = match hint {
+                            SwitchHint::Upswitch => match cached_best_5g {
+                                Some(b) => format!(
+                                    "上切未执行：家网 5G 最强 {b} dBm < 上切线 {up_rssi} dBm"
+                                ),
+                                None => format!(
+                                    "上切未执行：未扫到家网 5G（上切线 {up_rssi} dBm）"
+                                ),
+                            },
+                            SwitchHint::Downswitch => {
+                                "下切未执行：未扫到可用 2.4G 家网 AP".into()
+                            }
+                            _ => format!("无可用对端 AP（bonds={}）", bonds.len()),
+                        };
+                        log::info!("switch {:?}: {why}", hint);
+                        if let Ok(mut snap) = snapshot.lock() {
+                            snap.last_error = why.clone();
+                            snap.block_reason = why;
+                            snap.best_5g_rssi = cached_best_5g;
+                            snap.threshold_hint = threshold_hint_zh(
+                                on_preferred,
+                                score,
+                                rssi,
+                                switch_th,
+                                detect_th,
+                                up_rssi,
+                                cached_best_5g,
+                            );
+                        }
                         sm.finish_switch_ok();
                     }
                 }

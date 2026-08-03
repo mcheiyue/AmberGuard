@@ -36,6 +36,12 @@ pub struct StatusSnapshot {
     /// 当前 BSSID（一键入家网用）
     #[serde(default)]
     pub bssid: String,
+    /// 阈值对照人话：调阈值后应能在这里感到变化
+    #[serde(default)]
+    pub threshold_hint: String,
+    /// 最近一次扫描到的家网 5G 最强 RSSI（无则 null）
+    #[serde(default)]
+    pub best_5g_rssi: Option<i32>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -104,6 +110,8 @@ impl StatusSnapshot {
             screen: "ON".into(),
             l3_last: String::new(),
             bssid: String::new(),
+            threshold_hint: String::new(),
+            best_5g_rssi: None,
         }
     }
 }
