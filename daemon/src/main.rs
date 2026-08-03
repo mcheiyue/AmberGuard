@@ -233,21 +233,64 @@ fn link_reached_peer(
         .unwrap_or(false)
 }
 
-/// L3：对 connectivitycheck.gstatic.com/generate_204 发 HTTP/1.0，2s 超时
+/// L3：多终点探测。国内 gstatic 常 DNS 失败，不能因此判切网失败。
+/// 成功：任一 HTTP 204/200/30x，或 TCP 能通公共 DNS 端口（有出网能力）。
 fn l3_probe(timeout: Duration) -> Result<(), String> {
-    let addr = ("connectivitycheck.gstatic.com", 80)
+    // (host_or_none_for_ip, port, http_path_or_empty, host_header)
+    let http_targets: &[(&str, u16, &str, &str)] = &[
+        (
+            "connectivitycheck.gstatic.com",
+            80,
+            "/generate_204",
+            "connectivitycheck.gstatic.com",
+        ),
+        (
+            "connect.rom.miui.com",
+            80,
+            "/generate_204",
+            "connect.rom.miui.com",
+        ),
+        ("www.msftconnecttest.com", 80, "/connecttest.txt", "www.msftconnecttest.com"),
+    ];
+    let mut last_err = String::from("无终点");
+    for (host, port, path, hdr) in http_targets {
+        match l3_http_one(host, *port, path, hdr, timeout) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = e,
+        }
+    }
+    // DNS 全挂时：TCP 探测有出网即可（223.5.5.5 / 1.1.1.1）
+    for ip in &["223.5.5.5:53", "1.1.1.1:80", "8.8.8.8:53"] {
+        if let Ok(addr) = ip.parse() {
+            if TcpStream::connect_timeout(&addr, timeout).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    Err(last_err)
+}
+
+fn l3_http_one(
+    host: &str,
+    port: u16,
+    path: &str,
+    host_hdr: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let addr = (host, port)
         .to_socket_addrs()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("DNS {host}: {e}"))?
         .next()
-        .ok_or_else(|| "DNS 无结果".to_string())?;
+        .ok_or_else(|| format!("DNS {host}: 无结果"))?;
     let mut stream =
-        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
+        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect {host}: {e}"))?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
+    let req = format!(
+        "GET {path} HTTP/1.0\r\nHost: {host_hdr}\r\nConnection: close\r\n\r\n"
+    );
     stream
-        .write_all(
-            b"GET /generate_204 HTTP/1.0\r\nHost: connectivitycheck.gstatic.com\r\nConnection: close\r\n\r\n",
-        )
+        .write_all(req.as_bytes())
         .map_err(|e| format!("write: {e}"))?;
     let mut buf = [0u8; 128];
     let n = stream.read(&mut buf).map_err(|e| format!("read: {e}"))?;
@@ -256,15 +299,10 @@ fn l3_probe(timeout: Duration) -> Result<(), String> {
     }
     let head = String::from_utf8_lossy(&buf[..n]);
     let line = head.lines().next().unwrap_or("");
-    if line.contains(" 204") || line.contains(" 200") || line.contains(" 204 ") {
+    if line.contains(" 204") || line.contains(" 200") || line.contains(" 30") {
         Ok(())
     } else if line.contains("HTTP/") {
-        // 部分运营商劫持返回 302/200 也算「有网」
-        if line.contains(" 30") || line.contains(" 200") {
-            Ok(())
-        } else {
-            Err(format!("状态行: {line}"))
-        }
+        Err(format!("状态行: {line}"))
     } else {
         Err(format!("非 HTTP: {line}"))
     }
@@ -748,7 +786,7 @@ fn main() {
 
     let mut last_scan = Instant::now() - Duration::from_secs(60);
     let mut prev_station = StationSample::default();
-    // 链路键 ssid|bssid；daemon 自切后短暂忽略变更
+                // 链路键 ssid|bssid；daemon 自切后短暂忽略变更（含失败尝试后的回弹）
     let mut prev_link_key = String::new();
     let mut suppress_link_change_until: Option<Instant> = None;
     // 切后短锁 BSSID，防 band-steering 踢回
@@ -992,8 +1030,8 @@ fn main() {
             } else if !Config::is_persisted() {
                 "配置未落盘（可用默认运行）".to_string()
             } else {
-                // 无硬阻塞时，把阈值对照放到原因条，调参立刻可见
-                th_hint.clone()
+                // 无硬阻塞：原因条留空，阈值说明只走 threshold_hint（避免黄/灰双条重复）
+                String::new()
             };
 
             {
@@ -1361,22 +1399,23 @@ fn main() {
                                     );
                                 }
                             }
+                            // L3：链路已落到目标后只作连通性标注，失败不撤销成功、不进惩罚
+                            // （国内 gstatic DNS 失败曾导致「已切上却 L3Timeout+冷却」）
                             if ok && l3_on {
                                 match l3_probe(Duration::from_secs(2)) {
                                     Ok(()) => {
                                         if let Ok(mut snap) = snapshot.lock() {
                                             snap.l3_last = "ok".into();
                                         }
+                                        result = "Ok".into();
                                         log::info!("L3 probe ok");
                                     }
                                     Err(e) => {
-                                        log::warn!("L3 probe fail: {e}");
-                                        result = "L3Timeout".into();
-                                        ok = false;
+                                        log::warn!("L3 probe soft-fail (仍计切换成功): {e}");
+                                        result = "OkL3Warn".into();
                                         if let Ok(mut snap) = snapshot.lock() {
-                                            snap.l3_last = format!("fail:{e}");
-                                            snap.last_error =
-                                                format!("切后 L3 失败: {e}");
+                                            snap.l3_last = format!("warn:{e}");
+                                            // 不写 last_error 抢主状态；仅 l3_last
                                         }
                                     }
                                 }
@@ -1399,17 +1438,14 @@ fn main() {
                                     duration_ms: dur,
                                 },
                             );
-                            if ok {
-                                sm.finish_switch_ok();
-                                lock_bssid_until =
-                                    Some(Instant::now() + Duration::from_secs(45));
-                                if weak_rescue {
-                                    weak_bad_since = None;
-                                }
-                                if let Ok(w) = wpa.lock() {
-                                    if let Ok(s2) = w.status() {
-                                        let ns = s2.ssid.clone().unwrap_or_default();
-                                        let nb = s2.bssid.clone().unwrap_or_default();
+                            // 无论成败：短时忽略链路键变化，避免「代连失败回弹」被当成手动切网
+                            suppress_link_change_until =
+                                Some(Instant::now() + Duration::from_secs(15));
+                            if let Ok(w) = wpa.lock() {
+                                if let Ok(s2) = w.status() {
+                                    let ns = s2.ssid.clone().unwrap_or_default();
+                                    let nb = s2.bssid.clone().unwrap_or_default();
+                                    if !ns.is_empty() {
                                         prev_link_key = format!(
                                             "{}|{}",
                                             ns.to_lowercase(),
@@ -1417,12 +1453,20 @@ fn main() {
                                         );
                                     }
                                 }
+                            }
+                            if ok {
+                                sm.finish_switch_ok();
+                                lock_bssid_until =
+                                    Some(Instant::now() + Duration::from_secs(45));
+                                if weak_rescue {
+                                    weak_bad_since = None;
+                                }
                                 if let Ok(mut snap) = snapshot.lock() {
-                                    if result == "Ok" {
+                                    if result.starts_with("Ok") {
                                         snap.last_error.clear();
                                     }
                                 }
-                                log::info!("switch OK -> {}", peer.ssid);
+                                log::info!("switch OK -> {} ({})", peer.ssid, result);
                             } else {
                                 sm.enter_penalty(&bond_key);
                                 if weak_rescue {

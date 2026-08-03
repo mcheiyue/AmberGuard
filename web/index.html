@@ -70,6 +70,17 @@ main{padding:12px 14px 32px}
   background:linear-gradient(180deg,var(--amber),var(--cyan));opacity:.85;
 }
 .card h2{margin:0 0 10px;font-size:12px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.hist-list{display:flex;flex-direction:column;gap:8px}
+.hist-item{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.hist-top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:4px}
+.hist-time{font-size:11px;color:var(--muted)}
+.hist-res{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;border:1px solid var(--line)}
+.hist-res.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.hist-res.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
+.hist-res.muted{color:var(--muted)}
+.hist-main{font-size:13px;font-weight:550;line-height:1.35;word-break:break-all}
+.hist-b{font-size:10px;color:var(--cyan);font-weight:600}
+.hist-sub{font-size:11px;color:var(--muted);margin-top:4px}
 
 .hero{display:grid;grid-template-columns:1.2fr .8fr;gap:10px}
 .metric{background:var(--panel2);border-radius:12px;padding:12px;border:1px solid var(--line)}
@@ -196,10 +207,10 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="row"><span class="k">连接</span><span class="v" id="wpa_state" title="">—</span></div>
         <div class="row"><span class="k">守护</span><span class="v" id="sm" title="">—</span></div>
         <div class="row"><span class="k">阈值对照</span><span class="v" id="thLines" style="font-size:12px;text-align:right">—</span></div>
-        <div class="row"><span class="k">5G 最强</span><span class="v" id="best5g">—</span></div>
+        <div class="row"><span class="k">偏好侧最强</span><span class="v" id="best5g">—</span></div>
         <p class="err" id="err"></p>
         <p class="note" id="reasonBar" style="display:none;margin:8px 0 0;color:var(--warn)"></p>
-        <p class="note" id="thHint" style="margin:8px 0 0;line-height:1.45"></p>
+        <p class="note" id="thHint" style="margin:6px 0 0;line-height:1.45;color:var(--muted)"></p>
       </div>
       <div class="card" id="readyCard" style="display:none">
         <h2>上手检查</h2>
@@ -234,7 +245,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       </div>
       <div class="card">
         <h2>最近切换</h2>
-        <div id="histList" class="note" style="font-size:12px;font-family:var(--mono)">暂无</div>
+        <div id="histList" class="hist-list">暂无</div>
       </div>
     </section>
 
@@ -584,6 +595,25 @@ function fmtLocal(tsUnix) {
     return t.toLocaleString();
   }
 }
+function histReasonZh(r) {
+  const m = {
+    Score: '健康度', WeakRescue: '弱信号救援', Manual: '手动',
+    Upswitch: '上切', Downswitch: '下切'
+  };
+  return m[r] || r || '—';
+}
+function histResultZh(r) {
+  const m = {
+    Ok: '成功', OkL3Warn: '成功（连通性告警）', Fail: '未落到目标',
+    L3Timeout: 'L3 超时', Penalty: '冷却'
+  };
+  return m[r] || r || '—';
+}
+function histResultClass(r) {
+  if (r === 'Ok' || r === 'OkL3Warn') return 'ok';
+  if (r === 'Fail' || r === 'L3Timeout') return 'bad';
+  return 'muted';
+}
 
 async function loadHistory() {
   try {
@@ -592,12 +622,25 @@ async function loadHistory() {
     const box = $('histList');
     if (!box) return;
     const evs = j.events || [];
-    if (!evs.length) { box.textContent = '暂无'; return; }
+    if (!evs.length) { box.textContent = '暂无'; box.className = 'note'; return; }
+    box.className = 'hist-list';
     box.innerHTML = evs.slice(0, 10).map(e => {
       const ts = fmtLocal(e.ts_unix);
-      return '<div style="padding:4px 0;border-bottom:1px solid var(--line)">' +
-        ts + ' · ' + (e.reason || '') + ' · ' + (e.from_ssid || '?') + '→' + (e.to_ssid || '?') +
-        ' · ' + (e.result || '') + ' · ' + (e.duration_ms || 0) + 'ms</div>';
+      const fromB = e.from_band === '5' ? '5G' : (e.from_band === '2.4' ? '2.4G' : '');
+      const toB = e.to_band === '5' ? '5G' : (e.to_band === '2.4' ? '2.4G' : '');
+      const rc = histResultClass(e.result);
+      const ms = e.duration_ms != null ? (e.duration_ms >= 1000
+        ? ((e.duration_ms / 1000).toFixed(1) + ' 秒')
+        : (e.duration_ms + ' 毫秒')) : '';
+      return '<div class="hist-item">' +
+        '<div class="hist-top"><span class="hist-time">' + ts + '</span>' +
+        '<span class="hist-res ' + rc + '">' + histResultZh(e.result) + '</span></div>' +
+        '<div class="hist-main">' + escHtml(e.from_ssid || '?') +
+        (fromB ? ' <span class="hist-b">' + fromB + '</span>' : '') +
+        ' → ' + escHtml(e.to_ssid || '?') +
+        (toB ? ' <span class="hist-b">' + toB + '</span>' : '') + '</div>' +
+        '<div class="hist-sub">' + histReasonZh(e.reason) + (ms ? ' · 耗时 ' + ms : '') + '</div>' +
+        '</div>';
     }).join('');
   } catch (_) { /* ignore */ }
 }
