@@ -107,6 +107,7 @@ mod scanner;
 mod state_machine;
 mod station_info;
 mod web;
+mod wifi_framework;
 mod wpa_ctrl;
 
 fn json_resp(body: String, code: StatusCode) -> Response<std::io::Cursor<Vec<u8>>> {
@@ -205,11 +206,13 @@ fn main() {
                             .ok()
                             .and_then(|w| w.list_networks().ok())
                             .unwrap_or_default();
-                        parse_list_networks(&raw)
+                        let wpa_only: Vec<String> = parse_list_networks(&raw)
                             .into_iter()
                             .map(|(_, s)| s)
                             .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>()
+                            .collect();
+                        // 小米 wpa LIST 常只有当前网；合并 cmd/WifiConfigStore
+                        wifi_framework::merge_saved_ssids(&wpa_only)
                     };
                     let (dual_ok, dual_hint) = dual_band_pair_saved(&saved);
                     let snap = snapshot_http.lock().unwrap();
@@ -1005,28 +1008,52 @@ fn main() {
                     // SELECT 时记下 network id，成功/失败后再清 bssid 锁
                     let mut selected_nid: Option<u32> = None;
                     let switch_res = if same_ssid {
-                        wpa.lock().unwrap().roam(&peer.bssid)
-                    } else {
-                        let list = wpa.lock().unwrap().list_networks().unwrap_or_default();
-                        match network_id_for_ssid(&list, &peer.ssid) {
-                            Some(nid) => {
-                                selected_nid = Some(nid);
-                                let w = wpa.lock().unwrap();
-                                let _ = w.set_network_bssid(nid, &peer.bssid);
-                                // ponytail: 验证前不 clear bssid，否则关联未完成就被清掉
-                                w.select_network(nid)
+                        // 同 SSID：先 ROAM，失败再走框架（少见）
+                        match wpa.lock().unwrap().roam(&peer.bssid) {
+                            Ok(()) => Ok(()),
+                            Err(e) => {
+                                log::info!("ROAM fail ({e}), try framework connect");
+                                wifi_framework::framework_connect(
+                                    &peer.ssid,
+                                    Some(&peer.bssid),
+                                )
+                                .map_err(wpa_ctrl::WpaError::Parse)
                             }
-                            None => {
-                                let msg = format!(
-                                    "请先在系统设置连接并保存 WiFi「{}」（与当前「{}」双频成对）",
-                                    peer.ssid, ssid
-                                );
-                                log::warn!("{msg}");
-                                if let Ok(mut snap) = snapshot.lock() {
-                                    snap.last_error = msg.clone();
-                                    snap.block_reason = "对侧 SSID 未在系统保存".into();
+                        }
+                    } else {
+                        // 异名双频：优先 Android 框架（小米 wpa SELECT 基本无效）
+                        match wifi_framework::framework_connect(
+                            &peer.ssid,
+                            Some(&peer.bssid),
+                        ) {
+                            Ok(()) => {
+                                log::info!("framework connect issued -> {}", peer.ssid);
+                                Ok(())
+                            }
+                            Err(e_fw) => {
+                                log::warn!("framework connect: {e_fw}; fallback wpa SELECT");
+                                let list =
+                                    wpa.lock().unwrap().list_networks().unwrap_or_default();
+                                match network_id_for_ssid(&list, &peer.ssid) {
+                                    Some(nid) => {
+                                        selected_nid = Some(nid);
+                                        let w = wpa.lock().unwrap();
+                                        let _ = w.set_network_bssid(nid, &peer.bssid);
+                                        w.select_network(nid)
+                                    }
+                                    None => {
+                                        let msg = format!(
+                                            "无法切换到「{}」：{e_fw}；wpa 列表亦无精确 id（当前「{}」）",
+                                            peer.ssid, ssid
+                                        );
+                                        log::warn!("{msg}");
+                                        if let Ok(mut snap) = snapshot.lock() {
+                                            snap.last_error = msg.clone();
+                                            snap.block_reason = "对侧网络无法由框架/wpa 选中".into();
+                                        }
+                                        Err(wpa_ctrl::WpaError::Parse(msg))
+                                    }
                                 }
-                                Err(wpa_ctrl::WpaError::Parse(msg))
                             }
                         }
                     };

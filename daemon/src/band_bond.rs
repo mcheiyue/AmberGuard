@@ -286,17 +286,8 @@ pub fn parse_list_networks(raw: &str) -> Vec<(u32, String)> {
 
 pub fn network_id_for_ssid(list_raw: &str, ssid: &str) -> Option<u32> {
     let list = parse_list_networks(list_raw);
+    // 必须精确 SSID：stem 回退会把 5G 误绑到 2.4 的 id（小米 LIST 残缺时必炸）
     list.iter()
         .find(|(_, s)| s == ssid)
         .map(|(id, _)| *id)
-        // 启发式：已保存网络 stem 匹配
-        .or_else(|| {
-            let want = ssid_stem(ssid);
-            list.into_iter()
-                .find(|(_, s)| {
-                    let st = ssid_stem(s);
-                    !want.is_empty() && st.eq_ignore_ascii_case(&want)
-                })
-                .map(|(id, _)| id)
-        })
 }

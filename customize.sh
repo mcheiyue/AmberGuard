@@ -90,6 +90,10 @@ else
     cp -f "$CONFIG" "$bak" 2>/dev/null && ui_print "- backup → $bak"
     rm -f "$CONFIG"
     ui_print "- removed config（下次启动等同新装引导）"
+    # 只保留最近 3 份 bak，避免堆积
+    ls -1t "$AG_DIR"/config.toml.bak.* 2>/dev/null | tail -n +4 | while read -r old; do
+      rm -f "$old"
+    done
   fi
 fi
 
