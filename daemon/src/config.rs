@@ -90,6 +90,9 @@ pub struct Config {
     /// 切后 L3 探测（generate_204）。默认开。
     #[serde(default = "default_l3_probe")]
     pub l3_probe_enable: bool,
+    /// 偏好频段：`"5"`（默认上 5G）或 `"2.4"`（偏好 2.4，场景少见）
+    #[serde(default = "default_preferred_band")]
+    pub preferred_band: String,
 }
 
 fn default_interface() -> String {
@@ -131,6 +134,9 @@ fn default_auto_reconnect() -> bool {
 fn default_l3_probe() -> bool {
     true
 }
+fn default_preferred_band() -> String {
+    "5".into()
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -151,6 +157,7 @@ impl Default for Config {
             weak_hold_secs: default_weak_hold(),
             auto_reconnect: default_auto_reconnect(),
             l3_probe_enable: default_l3_probe(),
+            preferred_band: default_preferred_band(),
         }
     }
 }
@@ -172,6 +179,7 @@ pub struct ConfigPatch {
     pub weak_hold_secs: Option<u64>,
     pub auto_reconnect: Option<bool>,
     pub l3_probe_enable: Option<bool>,
+    pub preferred_band: Option<String>,
 }
 
 /// 字段说明（给面板引导用）
@@ -317,8 +325,8 @@ impl Config {
     pub fn tips() -> Vec<&'static str> {
         vec![
             "健康度：综合 RSSI 与重传率的 0–100 分，越高越好。不是单纯信号格。",
-            "下切：5G→2.4G，优先保流畅；上切：2.4G→5G，要等对侧够强且防抖通过。",
-            "异名双频（如 XXX_5G 与 XXX）须在系统 WiFi 里分别连接并保存，否则无法 SELECT 切网。",
+            "下切=离开偏好频段；上切=回到偏好（默认偏好 5G，可在设置改）。上切看对端 RSSI 门槛。",
+            "异名双频须在系统分别连接并保存；模块用框架代连时需能读到已存密码（家用 WPA2/3）。",
             "改阈值后立即生效并写入 /data/adb/amberguard/config.toml；可用「恢复默认」一键还原。",
             "日用防抖约下切 4s / 上切 7s；省电(eco)更长，少切网少扫描。",
             "手动切网保护：系统里换 WiFi 后会暂停自动切换一段时间；状态页可「立即恢复」。设为 0 即关闭。",
@@ -391,6 +399,19 @@ impl Config {
         }
         if let Some(v) = p.l3_probe_enable {
             self.l3_probe_enable = v;
+        }
+        if let Some(b) = p.preferred_band {
+            let b = b.trim().to_ascii_lowercase();
+            let norm = match b.as_str() {
+                "5" | "5g" | "5ghz" => "5",
+                "2.4" | "24" | "2.4g" | "2g" => "2.4",
+                _ => {
+                    return Err(ConfigError::Validate(
+                        "preferred_band 只能是 5 或 2.4".into(),
+                    ));
+                }
+            };
+            self.preferred_band = norm.into();
         }
         self.validate()
     }
@@ -496,6 +517,11 @@ impl Config {
         self.wpa_ctrl_path = cfg.wpa_ctrl_path;
         self.bonds = cfg.bonds;
         self.home_aps = normalize_home_aps(cfg.home_aps);
+        self.preferred_band = if cfg.preferred_band == "2.4" {
+            "2.4".into()
+        } else {
+            "5".into()
+        };
         self.mode = cfg.mode;
         self.log_level = cfg.log_level;
         self.user_hold_secs = cfg.user_hold_secs;

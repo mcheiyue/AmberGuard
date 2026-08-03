@@ -307,6 +307,14 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         </div>
       </div>
       <div class="card">
+        <h2>偏好频段</h2>
+        <p class="note detail" style="margin-top:0">守护会尽量待在偏好频段；另一频段作后备。默认 5G（家用）。</p>
+        <div class="btns" id="prefBandBtns">
+          <button type="button" data-pref="5" class="primary" onclick="setPrefBand('5')">优先 5G</button>
+          <button type="button" data-pref="2.4" onclick="setPrefBand('2.4')">优先 2.4G</button>
+        </div>
+      </div>
+      <div class="card">
         <h2>关于</h2>
         <div class="row"><span class="k">版本</span><span class="v" id="aboutVer">v0.5.0</span></div>
         <div class="row"><span class="k">面板</span><span class="v">127.0.0.1:8080</span></div>
@@ -513,7 +521,31 @@ function highlightMode(m) {
   });
 }
 
-async function softPause(mins) {
+  async function setPrefBand(b) {
+    try {
+      const r = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preferred_band: b }),
+        cache: 'no-store'
+      });
+      const j = await r.json();
+      if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+      highlightPref(b);
+      loadConfig();
+      tick();
+    } catch (e) {
+      $('err').textContent = '偏好频段: ' + e.message;
+    }
+  }
+  function highlightPref(b) {
+    document.querySelectorAll('#prefBandBtns [data-pref]').forEach(btn => {
+      if (btn.getAttribute('data-pref') === b) btn.classList.add('primary');
+      else btn.classList.remove('primary');
+    });
+  }
+
+  async function softPause(mins) {
   try {
     await fetch('/api/soft-pause?mins=' + (mins || 20), { method: 'POST', cache: 'no-store' });
     tick();
@@ -667,6 +699,7 @@ function renderFields(api) {
   const homeN = (api.config && api.config.home_aps) ? api.config.home_aps.length : 0;
   updateGuideCards(!!api.persisted, homeN);
   syncSettingsForm();
+  if (api.config && api.config.preferred_band) highlightPref(api.config.preferred_band);
 }
 
 async function doInit(goHome) {
@@ -1022,7 +1055,7 @@ async function tick() {
         b5.textContent = j.best_5g_rssi + ' dBm' + (ok ? '（达上切线）' : '（未达上切线）');
         b5.style.color = ok ? 'var(--ok)' : 'var(--warn)';
       } else {
-        b5.textContent = '未扫描到家网 5G';
+        b5.textContent = '未扫到偏好频段家网 AP';
         b5.style.color = 'var(--muted)';
       }
     }

@@ -75,34 +75,32 @@ fn threshold_hint_zh(
     switch_th: f32,
     detect_th: f32,
     up_rssi: i32,
-    best_5g: Option<i32>,
+    best_pref: Option<i32>,
 ) -> String {
     if on_preferred {
-        // 5G：三区间
         if score < switch_th {
             format!(
-                "5G 下切带：分 {score:.0} < 下切线 {switch_th:.0}（信号 {rssi} dBm）→ 防抖后切 2.4"
+                "偏好下切带：分 {score:.0} < 下切线 {switch_th:.0}（{rssi} dBm）→ 防抖后切后备频段"
             )
         } else if score < detect_th {
             format!(
-                "5G 观察带：下切线 {switch_th:.0} ≤ 分 {score:.0} < 观察线 {detect_th:.0} → 加勤扫描、暂不切"
+                "偏好观察带：下切线 {switch_th:.0} ≤ 分 {score:.0} < 观察线 {detect_th:.0} → 加勤扫描"
             )
         } else {
             format!(
-                "5G 稳定带：分 {score:.0} ≥ 观察线 {detect_th:.0}（信号 {rssi} dBm）→ 守护中"
+                "偏好稳定带：分 {score:.0} ≥ 观察线 {detect_th:.0}（{rssi} dBm）→ 守护中"
             )
         }
     } else {
-        // 2.4：上切看对端 RSSI
-        match best_5g {
+        match best_pref {
             Some(b) if b >= up_rssi => format!(
-                "2.4 上切就绪：家网 5G 最强 {b} dBm ≥ 上切线 {up_rssi} → 防抖后回 5G"
+                "后备频段·上切就绪：偏好侧最强 {b} dBm ≥ 上切线 {up_rssi} → 防抖后回偏好"
             ),
             Some(b) => format!(
-                "2.4 等待 5G：最强 {b} dBm < 上切线 {up_rssi}（再靠近或下调上切线）"
+                "后备频段·等待：偏好侧最强 {b} dBm < 上切线 {up_rssi}"
             ),
             None => format!(
-                "2.4 寻找 5G：需家网 5G ≥ {up_rssi} dBm（尚未扫到合格 AP）"
+                "后备频段·寻找偏好 AP（需 ≥ {up_rssi} dBm）"
             ),
         }
     }
@@ -750,7 +748,6 @@ fn main() {
 
     let mut last_scan = Instant::now() - Duration::from_secs(60);
     let mut prev_station = StationSample::default();
-    let preferred_is_5g = true;
     // 链路键 ssid|bssid；daemon 自切后短暂忽略变更
     let mut prev_link_key = String::new();
     let mut suppress_link_change_until: Option<Instant> = None;
@@ -802,6 +799,7 @@ fn main() {
             auto_rec,
             l3_on,
             eco,
+            preferred_is_5g,
         ) = {
             let c = config.lock().unwrap();
             (
@@ -820,6 +818,7 @@ fn main() {
                 c.auto_reconnect,
                 c.l3_probe_enable,
                 c.mode == "eco",
+                c.preferred_band == "5" || c.preferred_band.is_empty(),
             )
         };
 
@@ -1151,9 +1150,13 @@ fn main() {
                     .unwrap_or_default();
                 let scans = merge_scan_aps(wpa_scans, cmd_scans);
                 // 更新家网 5G 最强（不论是否达标），供面板对照上切线
+                // 偏好频段上最强家网 AP（上切对照）；字段名历史原因仍叫 best_5g
                 cached_best_5g = scans
                     .iter()
-                    .filter(|a| a.is_5g() && (home_aps.is_empty() || home_contains(&home_aps, &a.bssid)))
+                    .filter(|a| {
+                        a.is_5g() == preferred_is_5g
+                            && (home_aps.is_empty() || home_contains(&home_aps, &a.bssid))
+                    })
                     .map(|a| a.signal)
                     .max();
                 let ssid = ssid_now;
@@ -1161,11 +1164,26 @@ fn main() {
                 let cur_is_5g = band == "5";
 
                 let target = match hint {
+                    // 下切=离开偏好 → 非偏好频段；上切=回到偏好
                     SwitchHint::Downswitch => {
-                        best_on_band(&scans, &ssid, false, -80, &bonds, &home_aps)
+                        best_on_band(
+                            &scans,
+                            &ssid,
+                            !preferred_is_5g,
+                            -80,
+                            &bonds,
+                            &home_aps,
+                        )
                     }
                     SwitchHint::Upswitch => {
-                        best_on_band(&scans, &ssid, true, up_rssi, &bonds, &home_aps)
+                        best_on_band(
+                            &scans,
+                            &ssid,
+                            preferred_is_5g,
+                            up_rssi,
+                            &bonds,
+                            &home_aps,
+                        )
                     }
                     SwitchHint::None if weak_rescue => {
                         // 救援：① 同频更强(+5dB) ② 否则 2.4 且明显高于断开阈值
