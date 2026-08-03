@@ -6,7 +6,9 @@ use std::time::{Duration, Instant};
 
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
-use crate::band_bond::{best_bonded_on_band, network_id_for_ssid, parse_scan_results};
+use crate::band_bond::{
+    best_on_band, link_in_home, network_id_for_ssid, parse_scan_results, scan_views,
+};
 use crate::config::{Config, ConfigPatch};
 use crate::health_score::health_score;
 use crate::state_machine::{StateMachine, SwitchHint};
@@ -75,6 +77,8 @@ fn main() {
     };
     let wpa = Arc::new(Mutex::new(wpa));
     let snapshot = Arc::new(Mutex::new(StatusSnapshot::new()));
+    // 手动切网保护截止时间；HTTP 可 clear
+    let hold_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     let mut sm = StateMachine::new();
 
     let listen = config.lock().unwrap().listen.clone();
@@ -84,6 +88,8 @@ fn main() {
 
     let snapshot_http = Arc::clone(&snapshot);
     let config_http = Arc::clone(&config);
+    let hold_http = Arc::clone(&hold_until);
+    let wpa_http = Arc::clone(&wpa);
     thread::spawn(move || {
         for mut req in server.incoming_requests() {
             let url = req.url().to_string();
@@ -204,6 +210,45 @@ fn main() {
                     }
                     json_resp("{\"ok\":true,\"mode\":\"daily\"}".into(), StatusCode(200))
                 }
+                (Method::Get, "/api/hold/clear") | (Method::Post, "/api/hold/clear") => {
+                    if let Ok(mut h) = hold_http.lock() {
+                        *h = None;
+                    }
+                    if let Ok(mut s) = snapshot_http.lock() {
+                        s.hold_remaining_secs = 0;
+                    }
+                    log::info!("user_hold cleared via API");
+                    json_resp("{\"ok\":true,\"hold_remaining_secs\":0}".into(), StatusCode(200))
+                }
+                (Method::Get, "/api/scan") | (Method::Post, "/api/scan") => {
+                    let home = config_http.lock().unwrap().home_aps.clone();
+                    let scan_res = (|| -> Result<Vec<crate::band_bond::ScanApView>, String> {
+                        {
+                            let w = wpa_http.lock().map_err(|e| e.to_string())?;
+                            let _ = w.command("SCAN");
+                        }
+                        thread::sleep(Duration::from_millis(1200));
+                        let w = wpa_http.lock().map_err(|e| e.to_string())?;
+                        let raw = w.scan_results().map_err(|e| e.to_string())?;
+                        let aps = parse_scan_results(&raw);
+                        Ok(scan_views(&aps, &home))
+                    })();
+                    match scan_res {
+                        Ok(list) => {
+                            let body = serde_json::json!({
+                                "ok": true,
+                                "count": list.len(),
+                                "aps": list,
+                                "home_ap_count": home.len(),
+                            });
+                            json_resp(body.to_string(), StatusCode(200))
+                        }
+                        Err(e) => json_resp(
+                            format!("{{\"ok\":false,\"error\":\"{e}\"}}"),
+                            StatusCode(500),
+                        ),
+                    }
+                }
                 (Method::Get, "/api/init-config") | (Method::Post, "/api/init-config") => {
                     match Config::init_if_missing() {
                         Ok(written) => {
@@ -309,6 +354,9 @@ fn main() {
     let mut last_scan = Instant::now() - Duration::from_secs(60);
     let mut prev_station = StationSample::default();
     let preferred_is_5g = true;
+    // 链路键 ssid|bssid；daemon 自切后短暂忽略变更
+    let mut prev_link_key = String::new();
+    let mut suppress_link_change_until: Option<Instant> = None;
 
     // 启动时同步 mode
     {
@@ -317,6 +365,7 @@ fn main() {
             if c.mode == "pause" {
                 s.power_state = "PAUSE".into();
             }
+            s.user_hold_secs = c.user_hold_secs;
             s.thresholds = ThresholdsView {
                 score_detect_threshold: c.score_detect_threshold,
                 score_switch_threshold: c.score_switch_threshold,
@@ -326,8 +375,25 @@ fn main() {
         }
     }
 
+    let mut weak_bad_since: Option<Instant> = None;
+    let mut weak_disconnected = false;
+
     loop {
-        let (paused, switch_th, detect_th, up_rssi, bonds, iface, mode) = {
+        let (
+            paused,
+            switch_th,
+            detect_th,
+            up_rssi,
+            bonds,
+            home_aps,
+            iface,
+            mode,
+            hold_secs,
+            weak_action,
+            rssi_disc,
+            weak_hold,
+            auto_rec,
+        ) = {
             let c = config.lock().unwrap();
             (
                 c.mode == "pause",
@@ -335,9 +401,30 @@ fn main() {
                 c.score_detect_threshold,
                 c.upswitch_rssi_min_dbm,
                 c.bonds.clone(),
+                c.home_aps.clone(),
                 c.interface.clone(),
                 c.mode.clone(),
+                c.user_hold_secs,
+                c.weak_action.clone(),
+                c.rssi_disconnect_dbm,
+                c.weak_hold_secs,
+                c.auto_reconnect,
             )
+        };
+
+        // hold 剩余
+        let hold_rem = {
+            let mut h = hold_until.lock().unwrap();
+            match *h {
+                Some(until) if Instant::now() < until => {
+                    until.saturating_duration_since(Instant::now()).as_secs()
+                }
+                Some(_) => {
+                    *h = None;
+                    0
+                }
+                None => 0,
+            }
         };
 
         // 快照侧暂停标记与 config 对齐
@@ -354,6 +441,38 @@ fn main() {
 
         if let Some(ref st) = st {
             let rssi = st.signal_dbm.unwrap_or(-100);
+            let ssid_now = st.ssid.clone().unwrap_or_default();
+            let bssid_now = st.bssid.clone().unwrap_or_default();
+            let link_key = format!(
+                "{}|{}",
+                ssid_now.to_lowercase(),
+                bssid_now.to_lowercase()
+            );
+
+            // 检测用户手动切网（非 daemon 发起）
+            if !prev_link_key.is_empty()
+                && link_key != prev_link_key
+                && st.wpa_state == "COMPLETED"
+                && !ssid_now.is_empty()
+            {
+                let our = suppress_link_change_until
+                    .map(|t| Instant::now() < t)
+                    .unwrap_or(false);
+                if !our && hold_secs > 0 && !paused {
+                    let until = Instant::now() + Duration::from_secs(hold_secs);
+                    *hold_until.lock().unwrap() = Some(until);
+                    sm.reset_soft();
+                    log::info!(
+                        "manual switch detected {} -> {} ; user_hold {}s",
+                        prev_link_key,
+                        link_key,
+                        hold_secs
+                    );
+                }
+            }
+            if st.wpa_state == "COMPLETED" && !link_key.ends_with('|') {
+                prev_link_key = link_key;
+            }
 
             let (retry_opt, tx_delta) = match iw_station_dump(&iface) {
                 Ok(raw) => {
@@ -381,13 +500,29 @@ fn main() {
                 band == "2.4"
             };
 
+            let hold_rem_now = {
+                let h = hold_until.lock().unwrap();
+                match *h {
+                    Some(until) if Instant::now() < until => {
+                        until.saturating_duration_since(Instant::now()).as_secs()
+                    }
+                    _ => 0,
+                }
+            };
+
+            let in_home_now = link_in_home(&home_aps, &bssid_now, &ssid_now);
+
             {
                 let mut s = snapshot.lock().unwrap();
                 s.state = st.wpa_state.clone();
                 s.rssi = rssi;
-                s.ssid = st.ssid.clone().unwrap_or_default();
+                s.ssid = ssid_now.clone();
                 s.band = band.into();
                 s.score = score;
+                s.hold_remaining_secs = hold_rem_now;
+                s.user_hold_secs = hold_secs;
+                s.home_ap_count = home_aps.len();
+                s.in_home = in_home_now;
                 s.thresholds = ThresholdsView {
                     score_detect_threshold: detect_th,
                     score_switch_threshold: switch_th,
@@ -395,11 +530,82 @@ fn main() {
                     mode: mode.clone(),
                 };
                 if s.power_state != "PAUSE" {
-                    s.power_state = format!("{:?}", sm.state);
+                    if weak_disconnected {
+                        s.power_state = "WEAK_OFF".into();
+                    } else if hold_rem_now > 0 {
+                        s.power_state = format!("USER_HOLD({hold_rem_now}s)");
+                    } else if !in_home_now && !home_aps.is_empty() {
+                        s.power_state = "OUT_OF_HOME".into();
+                    } else {
+                        s.power_state = format!("{:?}", sm.state);
+                    }
                 }
             }
 
             if paused {
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+
+            // 手动保护期内：只观测，不切网
+            if hold_rem_now > 0 {
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+
+            // 弱信号断开（默认 off）
+            if weak_action == "disconnect" && st.wpa_state == "COMPLETED" {
+                if rssi < rssi_disc {
+                    if weak_bad_since.is_none() {
+                        weak_bad_since = Some(Instant::now());
+                    }
+                    let elapsed = weak_bad_since
+                        .map(|t| t.elapsed().as_secs())
+                        .unwrap_or(0);
+                    if elapsed >= weak_hold {
+                        log::warn!(
+                            "weak disconnect: rssi={rssi} < {rssi_disc} for {elapsed}s"
+                        );
+                        let _ = wpa.lock().unwrap().command("DISCONNECT");
+                        weak_disconnected = true;
+                        weak_bad_since = None;
+                        if let Ok(mut snap) = snapshot.lock() {
+                            snap.last_error =
+                                format!("弱信号已断开（{rssi} dBm < {rssi_disc}）");
+                            snap.power_state = "WEAK_OFF".into();
+                        }
+                        thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                } else {
+                    weak_bad_since = None;
+                }
+            } else {
+                weak_bad_since = None;
+            }
+
+            // 断后自动重连
+            if weak_disconnected && auto_rec {
+                if st.wpa_state != "COMPLETED" {
+                    if last_scan.elapsed() > Duration::from_secs(10) {
+                        log::info!("weak reconnect: RECONNECT");
+                        let _ = wpa.lock().unwrap().command("RECONNECT");
+                        last_scan = Instant::now();
+                    }
+                } else {
+                    weak_disconnected = false;
+                    if let Ok(mut snap) = snapshot.lock() {
+                        if snap.last_error.starts_with("弱信号") {
+                            snap.last_error.clear();
+                        }
+                    }
+                }
+            } else if st.wpa_state == "COMPLETED" {
+                weak_disconnected = false;
+            }
+
+            // 已配置家网且当前不在家网：不自动切
+            if !home_aps.is_empty() && !in_home_now {
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
@@ -419,15 +625,15 @@ fn main() {
                         .map(|r| parse_scan_results(&r))
                         .unwrap_or_default()
                 };
-                let ssid = st.ssid.clone().unwrap_or_default();
-                let cur_bssid = st.bssid.clone().unwrap_or_default();
+                let ssid = ssid_now;
+                let cur_bssid = bssid_now;
 
                 let target = match hint {
                     SwitchHint::Downswitch => {
-                        best_bonded_on_band(&scans, &ssid, false, -80, &bonds)
+                        best_on_band(&scans, &ssid, false, -80, &bonds, &home_aps)
                     }
                     SwitchHint::Upswitch => {
-                        best_bonded_on_band(&scans, &ssid, true, up_rssi, &bonds)
+                        best_on_band(&scans, &ssid, true, up_rssi, &bonds, &home_aps)
                     }
                     SwitchHint::None => None,
                 };
@@ -448,6 +654,10 @@ fn main() {
                         peer.freq,
                         peer.signal
                     );
+
+                    // 标记：随后链路变化视为 daemon 自切
+                    suppress_link_change_until =
+                        Some(Instant::now() + Duration::from_secs(12));
 
                     let switch_res = if same_ssid {
                         wpa.lock().unwrap().roam(&peer.bssid)
@@ -491,6 +701,18 @@ fn main() {
                             }
                             if ok {
                                 sm.finish_switch_ok();
+                                // 更新链路键，避免紧接着误判手动
+                                if let Ok(w) = wpa.lock() {
+                                    if let Ok(s2) = w.status() {
+                                        let ns = s2.ssid.clone().unwrap_or_default();
+                                        let nb = s2.bssid.clone().unwrap_or_default();
+                                        prev_link_key = format!(
+                                            "{}|{}",
+                                            ns.to_lowercase(),
+                                            nb.to_lowercase()
+                                        );
+                                    }
+                                }
                                 if let Ok(mut snap) = snapshot.lock() {
                                     snap.last_error.clear();
                                 }
@@ -520,6 +742,11 @@ fn main() {
                     sm.finish_switch_ok();
                 }
             }
+        } else if let Ok(mut s) = snapshot.lock() {
+            s.hold_remaining_secs = hold_rem;
+            s.user_hold_secs = hold_secs;
+            s.home_ap_count = home_aps.len();
+            s.in_home = true;
         }
 
         thread::sleep(Duration::from_secs(1));

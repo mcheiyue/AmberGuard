@@ -13,6 +13,14 @@ pub struct StatusSnapshot {
     pub last_error: String,
     /// 当前生效的阈值摘要（便于面板展示，无需再拉 /api/config）
     pub thresholds: ThresholdsView,
+    /// 手动切网保护剩余秒数（0=未在保护）
+    pub hold_remaining_secs: u64,
+    /// 配置的保护时长（便于设置页展示）
+    pub user_hold_secs: u64,
+    /// 家网 AP 数量（0=未配置，走启发式）
+    pub home_ap_count: usize,
+    /// 当前链路是否在家网内（未配置家网时恒 true）
+    pub in_home: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -40,6 +48,10 @@ impl StatusSnapshot {
                 upswitch_rssi_min_dbm: d.upswitch_rssi_min_dbm,
                 mode: d.mode,
             },
+            hold_remaining_secs: 0,
+            user_hold_secs: d.user_hold_secs,
+            home_ap_count: 0,
+            in_home: true,
         }
     }
 }

@@ -23,6 +23,59 @@ pub struct SsidBond {
     pub ssid_24g: String,
 }
 
+/// 家网 AP（BSSID 主键，通用多路由/Mesh）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomeAp {
+    pub bssid: String,
+    #[serde(default)]
+    pub ssid: String,
+    /// "5" | "2.4" | "auto"
+    #[serde(default = "default_home_band")]
+    pub band: String,
+}
+
+fn default_home_band() -> String {
+    "auto".into()
+}
+
+impl HomeAp {
+    pub fn bssid_norm(&self) -> String {
+        self.bssid.to_lowercase()
+    }
+
+    pub fn is_5g_hint(&self) -> Option<bool> {
+        match self.band.as_str() {
+            "5" | "5g" | "5G" => Some(true),
+            "2.4" | "24" | "2.4g" | "2G" | "2g" => Some(false),
+            _ => None,
+        }
+    }
+}
+
+/// 规范化 BSSID 比较
+pub fn bssid_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+pub fn home_contains(home: &[HomeAp], bssid: &str) -> bool {
+    home.iter().any(|h| bssid_eq(&h.bssid, bssid))
+}
+
+/// 当前连接是否属于家网（空家网=未配置，视为「未限制」由调用方解释）
+pub fn link_in_home(home: &[HomeAp], bssid: &str, ssid: &str) -> bool {
+    if home.is_empty() {
+        return true;
+    }
+    if !bssid.is_empty() && home_contains(home, bssid) {
+        return true;
+    }
+    // 回退：仅 SSID 命中（无 BSSID 时）
+    !ssid.is_empty()
+        && home
+            .iter()
+            .any(|h| !h.ssid.is_empty() && h.ssid == ssid)
+}
+
 /// 解析 wpa SCAN_RESULTS 文本
 pub fn parse_scan_results(raw: &str) -> Vec<ScanAp> {
     let mut out = Vec::new();
@@ -97,7 +150,8 @@ fn ssid_matches(current: &str, candidate: &str, bonds: &[SsidBond]) -> bool {
     !a.is_empty() && a.eq_ignore_ascii_case(&b)
 }
 
-/// 在目标频段上，找与 current_ssid 羁绊匹配、信号最好的 AP
+/// 在目标频段上选目标 AP。
+/// 优先级：① 家网组内（BSSID）② bonds/stem 启发式（无家网或家网内无可见目标时）
 pub fn best_bonded_on_band(
     scans: &[ScanAp],
     current_ssid: &str,
@@ -105,13 +159,65 @@ pub fn best_bonded_on_band(
     min_rssi: i32,
     bonds: &[SsidBond],
 ) -> Option<ScanAp> {
+    best_on_band(scans, current_ssid, want_5g, min_rssi, bonds, &[])
+}
+
+pub fn best_on_band(
+    scans: &[ScanAp],
+    current_ssid: &str,
+    want_5g: bool,
+    min_rssi: i32,
+    bonds: &[SsidBond],
+    home: &[HomeAp],
+) -> Option<ScanAp> {
+    let band_ok = |a: &ScanAp| a.is_5g() == want_5g && a.signal >= min_rssi;
+
+    if !home.is_empty() {
+        // 家网内：钉 BSSID，取组内目标频段最强
+        let in_home: Vec<&ScanAp> = scans
+            .iter()
+            .filter(|a| band_ok(a) && home_contains(home, &a.bssid))
+            .collect();
+        if let Some(best) = in_home.into_iter().max_by_key(|a| a.signal) {
+            return Some(best.clone());
+        }
+        // 家网已配置但目标频段无可见成员 → 不跨出家网乱切
+        return None;
+    }
+
     scans
         .iter()
-        .filter(|a| a.is_5g() == want_5g)
-        .filter(|a| a.signal >= min_rssi)
+        .filter(|a| band_ok(a))
         .filter(|a| ssid_matches(current_ssid, &a.ssid, bonds))
         .max_by_key(|a| a.signal)
         .cloned()
+}
+
+/// 扫描结果转 API JSON 友好结构
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanApView {
+    pub bssid: String,
+    pub ssid: String,
+    pub freq: u32,
+    pub signal: i32,
+    pub band: String,
+    pub in_home: bool,
+}
+
+pub fn scan_views(scans: &[ScanAp], home: &[HomeAp]) -> Vec<ScanApView> {
+    let mut v: Vec<ScanApView> = scans
+        .iter()
+        .map(|a| ScanApView {
+            bssid: a.bssid.clone(),
+            ssid: a.ssid.clone(),
+            freq: a.freq,
+            signal: a.signal,
+            band: if a.is_5g() { "5" } else { "2.4" }.into(),
+            in_home: home_contains(home, &a.bssid),
+        })
+        .collect();
+    v.sort_by(|a, b| b.signal.cmp(&a.signal));
+    v
 }
 
 /// 解析 LIST_NETWORKS，返回 (id, ssid)（兼容 tab / 多空格）

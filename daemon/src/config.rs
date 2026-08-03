@@ -8,6 +8,29 @@ use thiserror::Error;
 
 pub const ANDROID_CONFIG_PATH: &str = "/data/adb/amberguard/config.toml";
 const DEV_CONFIG_PATH: &str = "amberguard_config.toml";
+const MAX_HOME_APS: usize = 16;
+
+fn normalize_home_aps(list: Vec<crate::band_bond::HomeAp>) -> Vec<crate::band_bond::HomeAp> {
+    use crate::band_bond::HomeAp;
+    let mut out: Vec<HomeAp> = Vec::new();
+    for mut h in list {
+        h.bssid = h.bssid.trim().to_lowercase();
+        if h.bssid.len() < 11 {
+            continue;
+        }
+        if out.iter().any(|x| x.bssid == h.bssid) {
+            continue;
+        }
+        if h.band.is_empty() {
+            h.band = "auto".into();
+        }
+        out.push(h);
+        if out.len() >= MAX_HOME_APS {
+            break;
+        }
+    }
+    out
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -40,12 +63,30 @@ pub struct Config {
     pub wpa_ctrl_path: Option<String>,
     #[serde(default)]
     pub bonds: Vec<crate::band_bond::SsidBond>,
+    /// 家网 AP 列表（BSSID 主键）。非空时自动切换仅在组内进行。
+    #[serde(default)]
+    pub home_aps: Vec<crate::band_bond::HomeAp>,
     /// daily=自动切换 / pause=仅观测
     #[serde(default = "default_mode")]
     pub mode: String,
     /// 日志级别：error / warn / info / debug
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    /// 检测到用户手动切网后，暂停自动切换的秒数。0=关闭保护。默认 60。
+    #[serde(default = "default_user_hold_secs")]
+    pub user_hold_secs: u64,
+    /// 弱信号动作：off（默认）| disconnect
+    #[serde(default = "default_weak_action")]
+    pub weak_action: String,
+    /// 弱信号断开阈值（dBm）。仅 weak_action=disconnect 时生效。
+    #[serde(default = "default_rssi_disconnect")]
+    pub rssi_disconnect_dbm: i32,
+    /// 连续低于阈值多少秒才断网。
+    #[serde(default = "default_weak_hold")]
+    pub weak_hold_secs: u64,
+    /// 断后是否自动重连。
+    #[serde(default = "default_auto_reconnect")]
+    pub auto_reconnect: bool,
 }
 
 fn default_interface() -> String {
@@ -69,6 +110,21 @@ fn default_mode() -> String {
 fn default_log_level() -> String {
     "info".into()
 }
+fn default_user_hold_secs() -> u64 {
+    60
+}
+fn default_weak_action() -> String {
+    "off".into()
+}
+fn default_rssi_disconnect() -> i32 {
+    -90
+}
+fn default_weak_hold() -> u64 {
+    15
+}
+fn default_auto_reconnect() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -80,8 +136,14 @@ impl Default for Config {
             score_switch_threshold: default_score_switch(),
             wpa_ctrl_path: None,
             bonds: Vec::new(),
+            home_aps: Vec::new(),
             mode: default_mode(),
             log_level: default_log_level(),
+            user_hold_secs: default_user_hold_secs(),
+            weak_action: default_weak_action(),
+            rssi_disconnect_dbm: default_rssi_disconnect(),
+            weak_hold_secs: default_weak_hold(),
+            auto_reconnect: default_auto_reconnect(),
         }
     }
 }
@@ -95,7 +157,13 @@ pub struct ConfigPatch {
     pub mode: Option<String>,
     pub log_level: Option<String>,
     pub bonds: Option<Vec<crate::band_bond::SsidBond>>,
+    pub home_aps: Option<Vec<crate::band_bond::HomeAp>>,
     pub interface: Option<String>,
+    pub user_hold_secs: Option<u64>,
+    pub weak_action: Option<String>,
+    pub rssi_disconnect_dbm: Option<i32>,
+    pub weak_hold_secs: Option<u64>,
+    pub auto_reconnect: Option<bool>,
 }
 
 /// 字段说明（给面板引导用）
@@ -169,6 +237,39 @@ impl Config {
                 meaning: "当前在 2.4G 时，扫描到的 5G 对侧信号至少要达到此强度才允许切回 5G。RSSI 是接收信号强度，越接近 0 越好（如 -40 优于 -70）。",
                 guide: "调高（如 -55）= 要求 5G 更强才切回（更稳、更久停在 2.4G）；调低（如 -75）= 5G 稍弱也切回（更爱 5G）。日用建议 -70～-60，默认 -65。",
             },
+            FieldMeta {
+                key: "user_hold_secs",
+                label: "手动切网保护",
+                unit: "秒",
+                default: 60.0,
+                min: 0.0,
+                max: 300.0,
+                step: 5.0,
+                meaning: "检测到你在系统里手动换了 WiFi/AP 后，自动暂停切换这么久，避免守护立刻抢回。",
+                guide: "0=关闭保护；60 适合日常；想多调一会儿再自动可 120–180。",
+            },
+            FieldMeta {
+                key: "rssi_disconnect_dbm",
+                label: "弱信号断开 RSSI",
+                unit: "dBm（负数）",
+                default: -90.0,
+                min: -95.0,
+                max: -70.0,
+                step: 1.0,
+                meaning: "仅在开启「弱信号断开」时生效：连续低于此值达持续秒数后断开 WiFi。",
+                guide: "默认 -90。更接近 0（如 -80）= 更容易断；更低（如 -95）= 更难断。默认建议保持关断功能。",
+            },
+            FieldMeta {
+                key: "weak_hold_secs",
+                label: "弱信号持续秒数",
+                unit: "秒",
+                default: 15.0,
+                min: 5.0,
+                max: 60.0,
+                step: 1.0,
+                meaning: "连续低于断开 RSSI 多少秒才执行断网，防抖用。",
+                guide: "15 秒适合日常抖动；调高更不易误断。",
+            },
         ]
     }
 
@@ -208,6 +309,8 @@ impl Config {
             "异名双频（如 XXX_5G 与 XXX）须在系统 WiFi 里分别连接并保存，否则无法 SELECT 切网。",
             "改阈值后立即生效并写入 /data/adb/amberguard/config.toml；可用「恢复默认」一键还原。",
             "防抖时间固定为日用策略（下切约 4s、上切约 7s），本页不开放，避免误调导致来回跳。",
+            "手动切网保护：系统里换 WiFi 后会暂停自动切换一段时间；状态页可「立即恢复」。设为 0 即关闭。",
+            "家网：在设置里扫描并勾选属于你的 AP（按 BSSID）。配置后只在家网内双频切换，避免公共 WiFi / 错 AP。",
         ]
     }
 
@@ -244,10 +347,34 @@ impl Config {
         if let Some(b) = p.bonds {
             self.bonds = b;
         }
+        if let Some(homes) = p.home_aps {
+            self.home_aps = normalize_home_aps(homes);
+        }
         if let Some(iface) = p.interface {
             if !iface.is_empty() {
                 self.interface = iface;
             }
+        }
+        if let Some(h) = p.user_hold_secs {
+            self.user_hold_secs = h.min(300);
+        }
+        if let Some(a) = p.weak_action {
+            let a = a.to_ascii_lowercase();
+            if a != "off" && a != "disconnect" {
+                return Err(ConfigError::Validate(
+                    "weak_action 只能是 off 或 disconnect".into(),
+                ));
+            }
+            self.weak_action = a;
+        }
+        if let Some(v) = p.rssi_disconnect_dbm {
+            self.rssi_disconnect_dbm = v.clamp(-95, -70);
+        }
+        if let Some(v) = p.weak_hold_secs {
+            self.weak_hold_secs = v.clamp(5, 60);
+        }
+        if let Some(v) = p.auto_reconnect {
+            self.auto_reconnect = v;
         }
         self.validate()
     }
@@ -268,6 +395,12 @@ impl Config {
                 "下切阈值({:.0}) 必须小于 梯度检测阈值({:.0})",
                 self.score_switch_threshold, self.score_detect_threshold
             )));
+        }
+        let wa = self.weak_action.to_ascii_lowercase();
+        if wa != "off" && wa != "disconnect" {
+            return Err(ConfigError::Validate(
+                "weak_action 只能是 off 或 disconnect".into(),
+            ));
         }
         Ok(())
     }
@@ -338,8 +471,14 @@ impl Config {
         self.score_switch_threshold = cfg.score_switch_threshold;
         self.wpa_ctrl_path = cfg.wpa_ctrl_path;
         self.bonds = cfg.bonds;
+        self.home_aps = normalize_home_aps(cfg.home_aps);
         self.mode = cfg.mode;
         self.log_level = cfg.log_level;
+        self.user_hold_secs = cfg.user_hold_secs;
+        self.weak_action = cfg.weak_action;
+        self.rssi_disconnect_dbm = cfg.rssi_disconnect_dbm;
+        self.weak_hold_secs = cfg.weak_hold_secs;
+        self.auto_reconnect = cfg.auto_reconnect;
         Ok(())
     }
 

@@ -192,6 +192,13 @@ impl StateMachine {
         self.down_deb.reset();
         self.up_deb.reset();
     }
+
+    /// 用户手动切网或外部打断：回 Idle，清防抖（保留 penalty）
+    pub fn reset_soft(&mut self) {
+        self.state = State::Idle;
+        self.down_deb.reset();
+        self.up_deb.reset();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
