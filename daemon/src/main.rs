@@ -29,6 +29,69 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// 运行模式中文
+fn mode_zh(mode: &str) -> &'static str {
+    match mode {
+        "eco" => "省电",
+        "pause" => "暂停",
+        _ => "日用",
+    }
+}
+
+/// 守护状态中文（与面板 labelSm 对齐）
+fn power_zh(ps: &str) -> String {
+    let p = ps.trim();
+    if p.starts_with("USER_HOLD") {
+        return "手动保护中".into();
+    }
+    match p {
+        "Idle" | "idle" => "守护中".into(),
+        "GradientDetect" => "观察中".into(),
+        "Switching" => "切换中".into(),
+        "Penalty" => "冷却中".into(),
+        "Frozen" => "冻结".into(),
+        "PAUSE" | "Pause" => "已暂停".into(),
+        "OUT_OF_HOME" => "非家网".into(),
+        "WEAK_OFF" => "弱信号已断".into(),
+        "SCREEN_OFF" => "息屏降频".into(),
+        "" => "—".into(),
+        other => other.to_string(),
+    }
+}
+
+fn band_zh(band: &str) -> &'static str {
+    match band {
+        "5" => "5G",
+        "2.4" => "2.4G",
+        _ => "未知频段",
+    }
+}
+
+/// 面具列表 / status.txt 用的中文一行（模块实时信息）
+fn status_line_zh(
+    mode: &str,
+    ssid: &str,
+    band: &str,
+    score: f32,
+    power_state: &str,
+    block_reason: &str,
+) -> String {
+    let ssid_show = if ssid.is_empty() { "未连接" } else { ssid };
+    let st = if !block_reason.is_empty() {
+        block_reason.to_string()
+    } else {
+        power_zh(power_state)
+    };
+    format!(
+        "AmberGuard · {} · {} · {} · 分{:.0} · {}",
+        mode_zh(mode),
+        ssid_show,
+        band_zh(band),
+        score,
+        st
+    )
+}
+
 /// 把一行状态写入模块 module.prop 的 description=（面具列表展示）
 fn update_module_description(line: &str) {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -879,26 +942,19 @@ fn main() {
                         s.power_state = format!("{:?}", sm.state);
                     }
                 }
-                // 面具 action / 列表 description 用的一行状态
-                let st_label = if block_reason.is_empty() {
-                    s.power_state.as_str()
-                } else {
-                    block_reason.as_str()
-                };
-                let line = format!(
-                    "[{mode}] {} {band} score={:.0} · {st_label}",
-                    if ssid_now.is_empty() {
-                        "-"
-                    } else {
-                        ssid_now.as_str()
-                    },
+                // 面具列表 description + status.txt：中文实时模块状态
+                let line = status_line_zh(
+                    &mode,
+                    &ssid_now,
+                    band,
                     score,
+                    &s.power_state,
+                    &block_reason,
                 );
                 let _ = std::fs::write(
                     "/data/adb/amberguard/status.txt",
                     format!("{line}\n"),
                 );
-                // 限频写 module.prop description（列表可见；管理器不一定实时刷，点操作/重进会新）
                 update_module_description(&line);
             }
 
