@@ -553,37 +553,6 @@ fn main() {
                 continue;
             }
 
-            // 弱信号断开（默认 off）
-            if weak_action == "disconnect" && st.wpa_state == "COMPLETED" {
-                if rssi < rssi_disc {
-                    if weak_bad_since.is_none() {
-                        weak_bad_since = Some(Instant::now());
-                    }
-                    let elapsed = weak_bad_since
-                        .map(|t| t.elapsed().as_secs())
-                        .unwrap_or(0);
-                    if elapsed >= weak_hold {
-                        log::warn!(
-                            "weak disconnect: rssi={rssi} < {rssi_disc} for {elapsed}s"
-                        );
-                        let _ = wpa.lock().unwrap().command("DISCONNECT");
-                        weak_disconnected = true;
-                        weak_bad_since = None;
-                        if let Ok(mut snap) = snapshot.lock() {
-                            snap.last_error =
-                                format!("弱信号已断开（{rssi} dBm < {rssi_disc}）");
-                            snap.power_state = "WEAK_OFF".into();
-                        }
-                        thread::sleep(Duration::from_secs(1));
-                        continue;
-                    }
-                } else {
-                    weak_bad_since = None;
-                }
-            } else {
-                weak_bad_since = None;
-            }
-
             // 断后自动重连
             if weak_disconnected && auto_rec {
                 if st.wpa_state != "COMPLETED" {
@@ -604,16 +573,42 @@ fn main() {
                 weak_disconnected = false;
             }
 
-            // 已配置家网且当前不在家网：不自动切
+            // 已配置家网且当前不在家网：不自动切、不弱信号断
             if !home_aps.is_empty() && !in_home_now {
+                weak_bad_since = None;
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
 
+            // 弱信号：先给切换机会，满时限仍差才考虑断（默认 off）
+            // ponytail: OUT_OF_HOME/hold/pause 已在上方跳过
+            let mut weak_rescue = false;
+            if weak_action == "disconnect" && st.wpa_state == "COMPLETED" {
+                if rssi < rssi_disc {
+                    if weak_bad_since.is_none() {
+                        weak_bad_since = Some(Instant::now());
+                    }
+                    let elapsed = weak_bad_since
+                        .map(|t| t.elapsed().as_secs())
+                        .unwrap_or(0);
+                    // 满时限后每 ≥8s 救援一次，避免每秒 SCAN
+                    if elapsed >= weak_hold && last_scan.elapsed() >= Duration::from_secs(8) {
+                        weak_rescue = true;
+                        log::info!(
+                            "weak rescue window: rssi={rssi} < {rssi_disc} for {elapsed}s — try switch before disconnect"
+                        );
+                    }
+                } else {
+                    weak_bad_since = None;
+                }
+            } else {
+                weak_bad_since = None;
+            }
+
             let hint = sm.on_score(score, switch_th, detect_th, on_preferred);
 
-            if hint != SwitchHint::None {
-                if last_scan.elapsed() > Duration::from_secs(15) {
+            if hint != SwitchHint::None || weak_rescue {
+                if last_scan.elapsed() > Duration::from_secs(15) || weak_rescue {
                     let _ = wpa.lock().unwrap().command("SCAN");
                     thread::sleep(Duration::from_secs(2));
                     last_scan = Instant::now();
@@ -627,6 +622,7 @@ fn main() {
                 };
                 let ssid = ssid_now;
                 let cur_bssid = bssid_now;
+                let cur_is_5g = band == "5";
 
                 let target = match hint {
                     SwitchHint::Downswitch => {
@@ -635,18 +631,66 @@ fn main() {
                     SwitchHint::Upswitch => {
                         best_on_band(&scans, &ssid, true, up_rssi, &bonds, &home_aps)
                     }
+                    SwitchHint::None if weak_rescue => {
+                        // 救援：① 同频更强(+5dB) ② 否则 2.4 且明显高于断开阈值
+                        let better_same = best_on_band(
+                            &scans,
+                            &ssid,
+                            cur_is_5g,
+                            rssi + 5,
+                            &bonds,
+                            &home_aps,
+                        )
+                        .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid));
+                        better_same.or_else(|| {
+                            if cur_is_5g {
+                                best_on_band(
+                                    &scans,
+                                    &ssid,
+                                    false,
+                                    rssi_disc + 10,
+                                    &bonds,
+                                    &home_aps,
+                                )
+                                .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid))
+                            } else {
+                                None
+                            }
+                        })
+                    }
                     SwitchHint::None => None,
                 };
 
                 if let Some(peer) = target {
                     if peer.bssid.eq_ignore_ascii_case(&cur_bssid) {
                         sm.finish_switch_ok();
+                        if weak_rescue {
+                            // 没有更好目标 → 断
+                            log::warn!(
+                                "weak disconnect: no better peer (still on {})",
+                                cur_bssid
+                            );
+                            let _ = wpa.lock().unwrap().command("DISCONNECT");
+                            weak_disconnected = true;
+                            weak_bad_since = None;
+                            if let Ok(mut snap) = snapshot.lock() {
+                                snap.last_error = format!(
+                                    "弱信号已断开（{rssi} dBm，无更优 AP）"
+                                );
+                                snap.power_state = "WEAK_OFF".into();
+                            }
+                        }
                         continue;
                     }
                     let bond_key = format!("{ssid}->{}/{}", peer.ssid, peer.bssid);
                     let same_ssid = peer.ssid == ssid;
+                    let reason = if weak_rescue && hint == SwitchHint::None {
+                        "WeakRescue"
+                    } else {
+                        "Score"
+                    };
                     log::info!(
-                        "switch {:?}: {} {} ssid={} freq={} sig={} score={score:.1}",
+                        "switch {reason}/{:?}: {} {} ssid={} freq={} sig={} score={score:.1}",
                         hint,
                         if same_ssid { "ROAM" } else { "SELECT" },
                         peer.bssid,
@@ -701,6 +745,10 @@ fn main() {
                             }
                             if ok {
                                 sm.finish_switch_ok();
+                                // 救援成功：清弱信号计时
+                                if weak_rescue {
+                                    weak_bad_since = None;
+                                }
                                 // 更新链路键，避免紧接着误判手动
                                 if let Ok(w) = wpa.lock() {
                                     if let Ok(s2) = w.status() {
@@ -719,6 +767,17 @@ fn main() {
                                 log::info!("switch OK -> {}", peer.ssid);
                             } else {
                                 sm.enter_penalty(&bond_key);
+                                if weak_rescue {
+                                    log::warn!("weak disconnect after failed rescue switch");
+                                    let _ = wpa.lock().unwrap().command("DISCONNECT");
+                                    weak_disconnected = true;
+                                    weak_bad_since = None;
+                                    if let Ok(mut snap) = snapshot.lock() {
+                                        snap.last_error =
+                                            format!("弱信号已断开（切换失败，{rssi} dBm）");
+                                        snap.power_state = "WEAK_OFF".into();
+                                    }
+                                }
                             }
                         }
                         Err(e) => {
@@ -731,15 +790,42 @@ fn main() {
                                     p.until = Instant::now() + Duration::from_secs(15);
                                 }
                             }
+                            if weak_rescue {
+                                log::warn!("weak disconnect after rescue error: {msg}");
+                                let _ = wpa.lock().unwrap().command("DISCONNECT");
+                                weak_disconnected = true;
+                                weak_bad_since = None;
+                                if let Ok(mut snap) = snapshot.lock() {
+                                    snap.last_error =
+                                        format!("弱信号已断开（无可用网络，{rssi} dBm）");
+                                    snap.power_state = "WEAK_OFF".into();
+                                }
+                            }
                         }
                     }
                 } else {
-                    log::info!(
-                        "switch {:?}: no bonded peer (ssid={ssid}, bonds={})",
-                        hint,
-                        bonds.len()
-                    );
-                    sm.finish_switch_ok();
+                    if weak_rescue {
+                        log::warn!(
+                            "weak disconnect: no better peer in set (ssid={ssid}, home={}, bonds={})",
+                            home_aps.len(),
+                            bonds.len()
+                        );
+                        let _ = wpa.lock().unwrap().command("DISCONNECT");
+                        weak_disconnected = true;
+                        weak_bad_since = None;
+                        if let Ok(mut snap) = snapshot.lock() {
+                            snap.last_error =
+                                format!("弱信号已断开（无更优 AP，{rssi} dBm < {rssi_disc}）");
+                            snap.power_state = "WEAK_OFF".into();
+                        }
+                    } else {
+                        log::info!(
+                            "switch {:?}: no bonded peer (ssid={ssid}, bonds={})",
+                            hint,
+                            bonds.len()
+                        );
+                        sm.finish_switch_ok();
+                    }
                 }
             }
         } else if let Ok(mut s) = snapshot.lock() {

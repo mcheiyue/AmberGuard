@@ -19,8 +19,15 @@
   --amber:#c47a18;--amber-dim:#a06010;--cyan:#1a9a9a;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px/1.45 var(--font)}
-body{padding-bottom:calc(var(--tab-h) + var(--safe-b))}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--fg);font:14px/1.45 var(--font)}
+/* 底栏高度 + 安全区 + 余量，避免最后一张卡被挡 */
+body{padding-bottom:calc(var(--tab-h) + var(--safe-b) + 20px);scroll-padding-bottom:calc(var(--tab-h) + var(--safe-b) + 20px)}
+/* 简洁模式：藏说明文案 */
+html.compact .meaning,
+html.compact .guide,
+html.compact .tips-card,
+html.compact .note.detail{display:none!important}
+html.compact .field{margin:8px 0;padding-bottom:8px}
 /* 频谱氛围底 */
 .aura{position:fixed;inset:0;pointer-events:none;z-index:0;
   background:
@@ -49,7 +56,7 @@ header.top{
 .pill.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%, var(--line))}
 .pill.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%, var(--line))}
 
-main{padding:12px 14px 24px}
+main{padding:12px 14px 32px}
 .page{display:none}
 .page.on{display:block;animation:in .28s ease}
 @keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -180,19 +187,19 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
             <div class="bar"><i id="hbar"></i></div>
           </div>
           <div class="metric">
-            <div class="lab">RSSI</div>
+            <div class="lab">信号</div>
             <div class="num cyan" id="rssi">—</div>
             <span class="band-chip g24" id="bandchip">—</span>
           </div>
         </div>
-        <div class="row" style="margin-top:10px"><span class="k">SSID</span><span class="v" id="ssid">—</span></div>
-        <div class="row"><span class="k">wpa</span><span class="v" id="wpa_state">—</span></div>
-        <div class="row"><span class="k">状态机</span><span class="v" id="sm">—</span></div>
+        <div class="row" style="margin-top:10px"><span class="k">网络名</span><span class="v" id="ssid">—</span></div>
+        <div class="row"><span class="k">连接</span><span class="v" id="wpa_state" title="">—</span></div>
+        <div class="row"><span class="k">守护</span><span class="v" id="sm" title="">—</span></div>
         <p class="err" id="err"></p>
       </div>
       <div class="card" id="initCard">
         <h2>开始配置</h2>
-        <p class="note" style="margin-top:0">首次使用 AmberGuard？点此初始化默认配置，即可直接使用。</p>
+        <p class="note detail" style="margin-top:0">首次使用 AmberGuard？点此初始化默认配置，即可直接使用。</p>
         <button onclick="showInitModal()" class="primary" style="width:100%">初始化配置（日用默认）</button>
       </div>
       <div class="card">
@@ -201,7 +208,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
           <button class="primary" onclick="mode('daily')">日用（自动）</button>
           <button onclick="mode('pause')">暂停守护</button>
         </div>
-        <p class="note">暂停=长期只观测；手动换 WiFi 会触发短期「手动保护」（可在设置改秒数）。异名双频须在系统分别保存。</p>
+        <p class="note detail">暂停=长期只观测；手动换 WiFi 会触发短期「手动保护」（可在设置改秒数）。异名双频须在系统分别保存。</p>
       </div>
     </section>
 
@@ -209,7 +216,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
     <section class="page" id="p-cfg">
       <div class="card">
         <h2>阈值 · 热更新</h2>
-        <p class="note" style="margin-top:0">先选预设再微调。改完点保存即写入 config.toml。</p>
+        <p class="note detail" style="margin-top:0">先选预设再微调。改完点保存即写入 config.toml。</p>
         <div class="btns" id="presets"></div>
         <div id="fields"></div>
         <div class="btns">
@@ -219,7 +226,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <p class="okm" id="cfgMsg"></p>
         <p class="err" id="cfgErr"></p>
       </div>
-      <div class="card">
+      <div class="card tips-card">
         <h2>上手</h2>
         <ul class="tips" id="tips"></ul>
       </div>
@@ -243,17 +250,24 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       <div class="card">
         <h2>外观</h2>
         <div class="setting-row">
-          <div><div>主题</div><div class="note" style="margin:0">深色适合夜间；浅色适合白天</div></div>
+          <div><div>主题</div><div class="note detail" style="margin:0">深色适合夜间；浅色适合白天</div></div>
           <select id="themeSel" onchange="setTheme(this.value)">
             <option value="dark">深色</option>
             <option value="light">浅色</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <div><div>界面密度</div><div class="note detail" style="margin:0">简洁隐藏说明文字，界面更干净</div></div>
+          <select id="denseSel" onchange="setDense(this.value)">
+            <option value="compact">简洁</option>
+            <option value="full">详细</option>
           </select>
         </div>
       </div>
       <div class="card">
         <h2>日志级别</h2>
         <div class="setting-row">
-          <div><div>输出级别</div><div class="note" style="margin:0">debug 更啰嗦，error 只记故障</div></div>
+          <div><div>输出级别</div><div class="note detail" style="margin:0">debug 更啰嗦，error 只记故障</div></div>
           <select id="logLevel" onchange="saveLogLevel()">
             <option value="error">error</option>
             <option value="warn">warn</option>
@@ -264,7 +278,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       </div>
       <div class="card">
         <h2>家网</h2>
-        <p class="note" style="margin-top:0">扫描并勾选属于你的 AP（按 BSSID）。配置后只在家网内双频切换；空=兼容旧启发式。</p>
+        <p class="note detail" style="margin-top:0">扫描并勾选属于你的 AP（按 BSSID）。配置后只在家网内双频切换；空=兼容旧启发式。</p>
         <div class="btns">
           <button class="primary" type="button" onclick="scanAps()">扫描附近 AP</button>
           <button type="button" onclick="saveHomeAps()">保存家网</button>
@@ -279,11 +293,11 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       </div>
       <div class="card">
         <h2>手动切网保护</h2>
-        <p class="note" style="margin-top:0">系统里手动换 WiFi/AP 后，自动暂停切换，避免守护立刻抢回。0=关闭。</p>
+        <p class="note detail" style="margin-top:0">系统里手动换 WiFi/AP 后，自动暂停切换，避免守护立刻抢回。0=关闭。</p>
         <div class="field" style="border:0;padding-bottom:0;margin-bottom:0">
           <label>保护时长 <span class="def">默认 60 秒</span></label>
-          <p class="meaning"><strong>含义：</strong>检测到链路（SSID/BSSID）非守护发起的变化后，暂停自动 ROAM/SELECT 的秒数。</p>
-          <p class="guide"><strong>怎么调：</strong>日常 60；想多调一会儿再自动可 120–180；0 关闭（可能和手动打架）。</p>
+          <p class="meaning"><strong>含义：</strong>检测到链路非守护发起的变化后，暂停自动切换的秒数。</p>
+          <p class="guide"><strong>怎么调：</strong>日常 60；想多调一会儿再自动可 120–180；0 关闭。</p>
           <div class="ctrl">
             <input type="range" id="holdSecs" min="0" max="300" step="5" value="60" oninput="onHoldSlide()">
             <span class="val" id="holdSecsVal">60</span>
@@ -295,12 +309,12 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       </div>
       <div class="card">
         <h2>弱信号断开</h2>
-        <p class="note" style="margin-top:0">默认关闭。开启后信号持续极差才断 WiFi，可能无网，请谨慎。</p>
+        <p class="note detail" style="margin-top:0">默认关闭。开启后：信号持续极差时<strong>先</strong>换更强 AP 或下切 2.4，仍无更好选择才断 WiFi。暂停、手动保护、非家网时不下手。</p>
         <div class="setting-row">
-          <div><div>启用断开</div><div class="note" style="margin:0">off=只做频段切换</div></div>
+          <div><div>启用</div><div class="note detail" style="margin:0">关闭=只做频段切换；开启=先切换再断开</div></div>
           <select id="weakAction" onchange="onWeakUi()">
             <option value="off">关闭（推荐）</option>
-            <option value="disconnect">断开 WiFi</option>
+            <option value="disconnect">先切换再断开</option>
           </select>
         </div>
         <div id="weakExtra">
@@ -319,7 +333,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
             </div>
           </div>
           <div class="setting-row">
-            <div><div>断后自动重连</div><div class="note" style="margin:0">信号回升后 RECONNECT</div></div>
+            <div><div>断后自动重连</div><div class="note detail" style="margin:0">信号回升后自动重连</div></div>
             <select id="autoRec">
               <option value="true">开</option>
               <option value="false">关</option>
@@ -355,6 +369,50 @@ const $ = (id) => document.getElementById(id);
 let cfgCache = null;
 let dirty = false;
 
+/** wpa 连接态 → 中文（title 保留原文） */
+function labelWpa(s) {
+  if (!s) return '—';
+  const u = String(s).toUpperCase();
+  const map = {
+    COMPLETED: '已连接',
+    DISCONNECTED: '未连接',
+    INACTIVE: '未激活',
+    SCANNING: '扫描中',
+    AUTHENTICATING: '认证中',
+    ASSOCIATING: '关联中',
+    ASSOCIATED: '已关联',
+    '4WAY_HANDSHAKE': '握手中',
+    GROUP_HANDSHAKE: '组握手',
+    INTERFACE_DISABLED: '网卡禁用',
+    OFFLINE: '离线'
+  };
+  return map[u] || s;
+}
+
+/** 守护/状态机 → 中文 */
+function labelSm(s) {
+  if (!s) return '—';
+  const raw = String(s);
+  const m = raw.match(/^USER_HOLD\((\d+)s\)$/i);
+  if (m) return '手动保护（' + m[1] + '秒）';
+  const map = {
+    Idle: '待命',
+    GradientDetect: '观察中',
+    Switching: '切换中',
+    Penalty: '冷却中',
+    Frozen: '冻结',
+    PAUSE: '已暂停',
+    ON: '运行中',
+    OUT_OF_HOME: '非家网',
+    WEAK_OFF: '弱信号已断开',
+    OFFLINE: '离线'
+  };
+  if (map[raw]) return map[raw];
+  // Debug 打印的 State::Xxx
+  const bare = raw.replace(/^State::/, '');
+  return map[bare] || raw;
+}
+
 function tab(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('on'));
   document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
@@ -368,11 +426,17 @@ function tab(name) {
 function setTheme(t) {
   document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
   localStorage.setItem('ag_theme', t);
-  $('themeSel').value = t;
+  if ($('themeSel')) $('themeSel').value = t;
+}
+function setDense(mode) {
+  const compact = mode !== 'full';
+  document.documentElement.classList.toggle('compact', compact);
+  localStorage.setItem('ag_dense', compact ? 'compact' : 'full');
+  if ($('denseSel')) $('denseSel').value = compact ? 'compact' : 'full';
 }
 (function initTheme() {
-  const t = localStorage.getItem('ag_theme') || 'dark';
-  setTheme(t);
+  setTheme(localStorage.getItem('ag_theme') || 'dark');
+  setDense(localStorage.getItem('ag_dense') || 'compact');
 })();
 
 function markDirty() {
@@ -749,35 +813,39 @@ async function tick() {
     const chip = $('bandchip');
     chip.textContent = band;
     chip.className = 'band-chip ' + (j.band === '5' ? 'g5' : 'g24');
-    $('rssi').textContent = (j.rssi != null ? j.rssi : '—');
-    $('wpa_state').textContent = j.state || '—';
+    $('rssi').textContent = (j.rssi != null ? j.rssi + ' dBm' : '—');
+    const wpaEl = $('wpa_state');
+    wpaEl.textContent = labelWpa(j.state);
+    wpaEl.title = j.state || '';
     const sc = typeof j.score === 'number' ? j.score : 0;
     $('health').textContent = sc.toFixed(0);
     $('hbar').style.width = Math.max(0, Math.min(100, sc)) + '%';
-    $('sm').textContent = j.power_state || '—';
+    const smEl = $('sm');
+    smEl.textContent = labelSm(j.power_state);
+    smEl.title = j.power_state || '';
     $('err').textContent = j.last_error || '';
     const holdRem = j.hold_remaining_secs || 0;
     const ban = $('holdBanner');
     if (holdRem > 0) {
       ban.classList.add('on');
-      $('holdText').textContent = '还剩 ' + holdRem + ' 秒恢复自动切换（设置里可改保护时长）';
+      $('holdText').textContent = '还剩 ' + holdRem + ' 秒恢复自动切换';
       $('conn').textContent = '手动保护';
       $('conn').className = 'pill warn';
     } else if (j.power_state === 'WEAK_OFF') {
       ban.classList.add('on');
-      $('holdText').textContent = '弱信号已断开 WiFi' + (j.last_error ? ' · ' + j.last_error : '');
+      $('holdText').textContent = '弱信号已断开' + (j.last_error ? ' · ' + j.last_error : '');
       $('conn').textContent = '弱信号断';
       $('conn').className = 'pill bad';
     } else if (j.power_state === 'OUT_OF_HOME') {
       ban.classList.add('on');
-      $('holdText').textContent = '当前网络不在家网组，暂停自动切换（家网 ' + (j.home_ap_count || 0) + ' 个）';
+      $('holdText').textContent = '当前不在家网，不自动切换（已选 ' + (j.home_ap_count || 0) + ' 个）';
       $('conn').textContent = '非家网';
       $('conn').className = 'pill warn';
     } else {
       ban.classList.remove('on');
     }
     if (j.power_state === 'PAUSE' || (j.thresholds && j.thresholds.mode === 'pause')) {
-      $('conn').textContent = '暂停';
+      $('conn').textContent = '已暂停';
       $('conn').className = 'pill warn';
     }
     if (j.user_hold_secs != null && $('holdSecs') && document.activeElement !== $('holdSecs')) {
