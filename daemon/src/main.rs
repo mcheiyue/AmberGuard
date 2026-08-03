@@ -37,6 +37,29 @@ fn push_history(hist: &Arc<Mutex<VecDeque<SwitchEvent>>>, ev: SwitchEvent) {
     }
 }
 
+/// 切后是否真到了目标：COMPLETED + SSID 一致，且（有目标 BSSID 时）BSSID 一致
+fn link_reached_peer(
+    st: &crate::wpa_ctrl::WpaStatus,
+    peer_ssid: &str,
+    peer_bssid: &str,
+) -> bool {
+    if st.wpa_state != "COMPLETED" {
+        return false;
+    }
+    let got_ssid = st.ssid.as_deref().unwrap_or("");
+    if got_ssid.is_empty() || got_ssid != peer_ssid {
+        return false;
+    }
+    let want_b = peer_bssid.trim();
+    if want_b.is_empty() {
+        return true;
+    }
+    st.bssid
+        .as_deref()
+        .map(|b| b.eq_ignore_ascii_case(want_b))
+        .unwrap_or(false)
+}
+
 /// L3：对 connectivitycheck.gstatic.com/generate_204 发 HTTP/1.0，2s 超时
 fn l3_probe(timeout: Duration) -> Result<(), String> {
     let addr = ("connectivitycheck.gstatic.com", 80)
@@ -966,17 +989,19 @@ fn main() {
                     suppress_link_change_until =
                         Some(Instant::now() + Duration::from_secs(12));
 
+                    // SELECT 时记下 network id，成功/失败后再清 bssid 锁
+                    let mut selected_nid: Option<u32> = None;
                     let switch_res = if same_ssid {
                         wpa.lock().unwrap().roam(&peer.bssid)
                     } else {
                         let list = wpa.lock().unwrap().list_networks().unwrap_or_default();
                         match network_id_for_ssid(&list, &peer.ssid) {
                             Some(nid) => {
+                                selected_nid = Some(nid);
                                 let w = wpa.lock().unwrap();
                                 let _ = w.set_network_bssid(nid, &peer.bssid);
-                                let r = w.select_network(nid);
-                                let _ = w.set_network_bssid(nid, "\"\"");
-                                r
+                                // ponytail: 验证前不 clear bssid，否则关联未完成就被清掉
+                                w.select_network(nid)
                             }
                             None => {
                                 let msg = format!(
@@ -995,19 +1020,52 @@ fn main() {
 
                     match switch_res {
                         Ok(()) => {
+                            // 须落到目标 SSID/BSSID，不能只看 COMPLETED（原链路本就是 COMPLETED）
                             let mut ok = false;
-                            for _ in 0..30 {
-                                thread::sleep(Duration::from_millis(200));
+                            let mut last_got = String::new();
+                            for i in 0..40 {
+                                thread::sleep(Duration::from_millis(250));
                                 if let Ok(w) = wpa.lock() {
                                     if let Ok(s2) = w.status() {
-                                        if s2.wpa_state == "COMPLETED" {
+                                        let gs = s2.ssid.clone().unwrap_or_default();
+                                        let gb = s2.bssid.clone().unwrap_or_default();
+                                        last_got = format!(
+                                            "{}|{}|{}",
+                                            s2.wpa_state, gs, gb
+                                        );
+                                        if link_reached_peer(&s2, &peer.ssid, &peer.bssid) {
                                             ok = true;
+                                            log::info!(
+                                                "switch verified at {}ms -> {} {}",
+                                                (i + 1) * 250,
+                                                gs,
+                                                gb
+                                            );
                                             break;
                                         }
                                     }
                                 }
                             }
+                            // 清目标网 bssid 钉（无论成败，避免长期锁死）
+                            if let Some(nid) = selected_nid {
+                                if let Ok(w) = wpa.lock() {
+                                    let _ = w.set_network_bssid(nid, "\"\"");
+                                }
+                            }
                             let mut result = if ok { "Ok" } else { "Fail" }.to_string();
+                            if !ok {
+                                log::warn!(
+                                    "switch not landed: want {}/{} got {last_got}",
+                                    peer.ssid,
+                                    peer.bssid
+                                );
+                                if let Ok(mut snap) = snapshot.lock() {
+                                    snap.last_error = format!(
+                                        "切换未生效（目标 {}，仍为 {last_got}）",
+                                        peer.ssid
+                                    );
+                                }
+                            }
                             if ok && l3_on {
                                 match l3_probe(Duration::from_secs(2)) {
                                     Ok(()) => {
@@ -1088,6 +1146,11 @@ fn main() {
                         Err(e) => {
                             log::error!("switch failed: {e}");
                             let msg = e.to_string();
+                            if let Some(nid) = selected_nid {
+                                if let Ok(w) = wpa.lock() {
+                                    let _ = w.set_network_bssid(nid, "\"\"");
+                                }
+                            }
                             push_history(
                                 &history,
                                 SwitchEvent {
