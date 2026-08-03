@@ -205,15 +205,18 @@ impl StateMachine {
             return SwitchHint::None;
         }
 
-        // —— 非首选（通常 2.4）：上切防抖；对端质量不在这里判 ——
+        // —— 非偏好频段：上切回偏好 ——
+        // 后备上仍健康（分≥观察线）→ 上切防抖 25s，减轻「手切后备立刻被拉回」。
+        // 后备已差 → 7s 尽快回偏好。
         self.down_deb.reset();
         self.state = State::GradientDetect;
+        let up_need = if score >= detect_th { 25 } else { 7 };
+        self.up_deb.set_need_secs(up_need);
         if self.up_deb.push_and_ready(score, |_| true) {
             self.up_deb.reset();
             self.state = State::Switching;
             return SwitchHint::Upswitch;
         }
-        let _ = detect_th;
         SwitchHint::None
     }
 

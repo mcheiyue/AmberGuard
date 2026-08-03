@@ -254,8 +254,8 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       <div class="card">
         <h2>阈值 · 热更新</h2>
         <p class="note detail" style="margin-top:0">
-          <strong>优先级：</strong>① 下切线（健康分，离开 5G）→ ② 上切线（5G 最低 RSSI，回 5G）→ ③ 观察线（只观察/加扫，不单独切网）。
-          健康分≈半信号+半重传。改完回「状态」看「阈值对照 / 5G 最强」是否跟着变。
+          <strong>优先级：</strong>① 下切线（离开<strong>偏好</strong>）→ ② 上切线（偏好侧最低 RSSI）→ ③ 观察线（观察/加扫；后备上健康时减慢拉回）。
+          与设置里「优先 5G / 2.4G」联动。健康分≈半信号+半重传。
         </p>
         <p class="note detail" style="margin-top:0">先选预设再微调。改完点保存即写入 config.toml。</p>
         <div class="btns" id="presets"></div>
@@ -1087,7 +1087,7 @@ async function tick() {
     if (thEl) {
       thEl.innerHTML =
         '下切 <b>' + (th.score_switch_threshold ?? '—') + '</b> · 观察 <b>' +
-        (th.score_detect_threshold ?? '—') + '</b> · 上切5G≥ <b>' +
+        (th.score_detect_threshold ?? '—') + '</b> · 回偏好≥ <b>' +
         (th.upswitch_rssi_min_dbm ?? '—') + '</b> dBm';
     }
     const b5 = $('best5g');

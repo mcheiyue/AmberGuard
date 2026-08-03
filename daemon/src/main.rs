@@ -210,11 +210,14 @@ fn push_history(hist: &Arc<Mutex<VecDeque<SwitchEvent>>>, ev: SwitchEvent) {
     }
 }
 
-/// 切后是否真到了目标：COMPLETED + SSID 一致，且（有目标 BSSID 时）BSSID 一致
+/// 切后是否真到了目标。
+/// 异名双频：SSID 一致即可（家网常有多 BSSID，钉死 BSSID 会误判失败并狂重试→系统停用网络）。
+/// 同 SSID 漫游：有目标 BSSID 时再比 BSSID。
 fn link_reached_peer(
     st: &crate::wpa_ctrl::WpaStatus,
     peer_ssid: &str,
     peer_bssid: &str,
+    require_bssid: bool,
 ) -> bool {
     if st.wpa_state != "COMPLETED" {
         return false;
@@ -222,6 +225,9 @@ fn link_reached_peer(
     let got_ssid = st.ssid.as_deref().unwrap_or("");
     if got_ssid.is_empty() || got_ssid != peer_ssid {
         return false;
+    }
+    if !require_bssid {
+        return true;
     }
     let want_b = peer_bssid.trim();
     if want_b.is_empty() {
@@ -1298,10 +1304,12 @@ fn main() {
                     suppress_link_change_until =
                         Some(Instant::now() + Duration::from_secs(12));
 
-                    // SELECT 时记下 network id，成功/失败后再清 bssid 锁
+                    // 尝试前尽量 enable 所有 wpa 网络，减轻「管理员停用」残留
+                    {
+                        let _ = wpa.lock().unwrap().command("ENABLE_NETWORK all");
+                    }
                     let mut selected_nid: Option<u32> = None;
                     let switch_res = if same_ssid {
-                        // 同 SSID：先 ROAM，失败再走框架（少见）
                         match wpa.lock().unwrap().roam(&peer.bssid) {
                             Ok(()) => Ok(()),
                             Err(e) => {
@@ -1314,7 +1322,6 @@ fn main() {
                             }
                         }
                     } else {
-                        // 异名双频：优先 Android 框架（小米 wpa SELECT 基本无效）
                         match wifi_framework::framework_connect(
                             &peer.ssid,
                             Some(&peer.bssid),
@@ -1331,18 +1338,20 @@ fn main() {
                                     Some(nid) => {
                                         selected_nid = Some(nid);
                                         let w = wpa.lock().unwrap();
-                                        let _ = w.set_network_bssid(nid, &peer.bssid);
+                                        let _ = w.enable_network(nid);
+                                        // 异名双频不钉 BSSID，避免选错/失败
+                                        let _ = w.set_network_bssid(nid, "\"\"");
                                         w.select_network(nid)
                                     }
                                     None => {
                                         let msg = format!(
-                                            "无法切换到「{}」：{e_fw}；wpa 列表亦无精确 id（当前「{}」）",
-                                            peer.ssid, ssid
+                                            "无法切换到「{}」：{e_fw}；请确认系统已保存该网且未被停用",
+                                            peer.ssid
                                         );
                                         log::warn!("{msg}");
                                         if let Ok(mut snap) = snapshot.lock() {
                                             snap.last_error = msg.clone();
-                                            snap.block_reason = "对侧网络无法由框架/wpa 选中".into();
+                                            snap.block_reason = "对侧网络无法选中（或已停用）".into();
                                         }
                                         Err(wpa_ctrl::WpaError::Parse(msg))
                                     }
@@ -1353,10 +1362,10 @@ fn main() {
 
                     match switch_res {
                         Ok(()) => {
-                            // 须落到目标 SSID/BSSID，不能只看 COMPLETED（原链路本就是 COMPLETED）
+                            // 异名：只验 SSID；同名漫游：验 BSSID
                             let mut ok = false;
                             let mut last_got = String::new();
-                            for i in 0..40 {
+                            for i in 0..48 {
                                 thread::sleep(Duration::from_millis(250));
                                 if let Ok(w) = wpa.lock() {
                                     if let Ok(s2) = w.status() {
@@ -1366,7 +1375,12 @@ fn main() {
                                             "{}|{}|{}",
                                             s2.wpa_state, gs, gb
                                         );
-                                        if link_reached_peer(&s2, &peer.ssid, &peer.bssid) {
+                                        if link_reached_peer(
+                                            &s2,
+                                            &peer.ssid,
+                                            &peer.bssid,
+                                            same_ssid,
+                                        ) {
                                             ok = true;
                                             log::info!(
                                                 "switch verified at {}ms -> {} {}",
@@ -1375,6 +1389,38 @@ fn main() {
                                                 gb
                                             );
                                             break;
+                                        }
+                                    }
+                                }
+                            }
+                            // 未落地且异名：再试一次不带 BSSID 的框架连接（部分机 -b 空转）
+                            if !ok && !same_ssid {
+                                log::info!("retry framework connect without bssid -> {}", peer.ssid);
+                                if wifi_framework::framework_connect(&peer.ssid, None).is_ok() {
+                                    for i in 0..32 {
+                                        thread::sleep(Duration::from_millis(250));
+                                        if let Ok(w) = wpa.lock() {
+                                            if let Ok(s2) = w.status() {
+                                                last_got = format!(
+                                                    "{}|{}|{}",
+                                                    s2.wpa_state,
+                                                    s2.ssid.clone().unwrap_or_default(),
+                                                    s2.bssid.clone().unwrap_or_default()
+                                                );
+                                                if link_reached_peer(
+                                                    &s2,
+                                                    &peer.ssid,
+                                                    &peer.bssid,
+                                                    false,
+                                                ) {
+                                                    ok = true;
+                                                    log::info!(
+                                                        "switch verified (retry) at {}ms",
+                                                        (i + 1) * 250
+                                                    );
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                 }

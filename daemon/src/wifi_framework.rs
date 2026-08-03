@@ -302,36 +302,71 @@ fn run_connect(ssid: &str, sec: WifiSecurity, psk: Option<&str>, bssid: Option<&
     ))
 }
 
-/// 框架切网：按 open / wpa2 / wpa3 自适应；PSK 缺失时给出可操作中文说明
+/// 框架切网：安全类型 + 是否带 BSSID 多组合尝试。
+/// 注意：`cmd` 返回成功只表示「已下发」，不保证已关联；调用方必须验链路。
+/// 小米上带 `-b` 常失败或空转，故**先不带 BSSID**，再带 BSSID 重试。
 pub fn framework_connect(ssid: &str, bssid: Option<&str>) -> Result<(), String> {
-    let sec = security_for_ssid(ssid);
+    let primary = security_for_ssid(ssid);
+    let mut secs = vec![primary, WifiSecurity::Wpa3, WifiSecurity::Wpa2];
+    secs.dedup();
+
     log::info!(
-        "framework connect try ssid={} sec={:?} bssid={}",
+        "framework connect try ssid={} primary={:?} bssid={}",
         ssid,
-        sec,
-        bssid.unwrap_or("")
+        primary,
+        bssid.unwrap_or("-")
     );
 
-    match sec {
-        WifiSecurity::Open => run_connect(ssid, WifiSecurity::Open, None, bssid),
-        WifiSecurity::Wpa2 => {
-            let psk = psk_from_store(ssid)?;
-            run_connect(ssid, WifiSecurity::Wpa2, Some(&psk), bssid)
+    let psk = if primary == WifiSecurity::Open && secs.iter().all(|s| *s == WifiSecurity::Open) {
+        None
+    } else {
+        match psk_from_store(ssid) {
+            Ok(p) => Some(p),
+            Err(e) if primary == WifiSecurity::Open => {
+                log::warn!("open 网无 PSK 可读: {e}");
+                None
+            }
+            Err(e) => return Err(e),
         }
-        WifiSecurity::Wpa3 => {
-            let psk = psk_from_store(ssid)?;
-            // 先 wpa3，失败再 wpa2（不少保存项双栈）
-            match run_connect(ssid, WifiSecurity::Wpa3, Some(&psk), bssid) {
-                Ok(()) => Ok(()),
-                Err(e1) => {
-                    log::warn!("wpa3 connect fail, fallback wpa2: {e1}");
-                    run_connect(ssid, WifiSecurity::Wpa2, Some(&psk), bssid).map_err(|e2| {
-                        format!("wpa3 与 wpa2 均失败。{e1} | {e2}")
-                    })
+    };
+
+    let mut last_err = String::from("未尝试");
+    // 1) 不钉 BSSID（OEM 更稳）2) 再钉 BSSID
+    let bssid_opts: &[Option<&str>] = if bssid.map(|b| !b.is_empty()).unwrap_or(false) {
+        &[None, bssid]
+    } else {
+        &[None]
+    };
+
+    for b in bssid_opts {
+        for sec in &secs {
+            let r = match sec {
+                WifiSecurity::Open => run_connect(ssid, WifiSecurity::Open, None, *b),
+                WifiSecurity::Wpa2 | WifiSecurity::Wpa3 => {
+                    let Some(ref p) = psk else {
+                        last_err = format!("「{ssid}」无密码，无法用 {:?}", sec);
+                        continue;
+                    };
+                    run_connect(ssid, *sec, Some(p), *b)
+                }
+            };
+            match r {
+                Ok(()) => {
+                    log::info!(
+                        "framework connect issued ok sec={:?} bssid={}",
+                        sec,
+                        b.unwrap_or("-")
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::debug!("framework connect try fail sec={:?}: {e}", sec);
+                    last_err = e;
                 }
             }
         }
     }
+    Err(last_err)
 }
 
 #[cfg(test)]
