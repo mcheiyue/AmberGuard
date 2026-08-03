@@ -101,7 +101,76 @@ fn now_stamp() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    format!("{secs}")
+    #[cfg(unix)]
+    {
+        // 本机本地时间（Android bionic / Linux）
+        #[repr(C)]
+        struct Tm {
+            tm_sec: i32,
+            tm_min: i32,
+            tm_hour: i32,
+            tm_mday: i32,
+            tm_mon: i32,
+            tm_year: i32,
+            tm_wday: i32,
+            tm_yday: i32,
+            tm_isdst: i32,
+            tm_gmtoff: i64,
+            tm_zone: *const i8,
+        }
+        extern "C" {
+            fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+        }
+        let t = secs as i64;
+        let mut tm = Tm {
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 0,
+            tm_mon: 0,
+            tm_year: 0,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+            tm_gmtoff: 0,
+            tm_zone: std::ptr::null(),
+        };
+        let p = unsafe { localtime_r(&t, &mut tm) };
+        if !p.is_null() {
+            return format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                tm.tm_year + 1900,
+                tm.tm_mon + 1,
+                tm.tm_mday,
+                tm.tm_hour,
+                tm.tm_min,
+                tm.tm_sec
+            );
+        }
+    }
+    // 非 unix 或 localtime 失败：UTC 可读（仍非 epoch 裸数字）
+    let (y, mo, d, h, mi, s) = civil_from_days(secs);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}Z")
+}
+
+/// days since 1970-01-01 → civil date (Howard Hinnant)
+fn civil_from_days(secs: u64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = (secs / 86400) as i64;
+    let sod = (secs % 86400) as u32;
+    let h = sod / 3600;
+    let mi = (sod % 3600) / 60;
+    let s = sod % 60;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m as u32, d as u32, h, mi, s)
 }
 
 /// 初始化全局日志。`level` 如 "info"/"debug"。

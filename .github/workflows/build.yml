@@ -69,9 +69,10 @@ jobs:
           mkdir -p zip_root/bin
           cp out/jniLibs/arm64-v8a/amberguard zip_root/bin/amberguard
           chmod 755 zip_root/bin/amberguard
-          for f in module.prop post-fs-data.sh service.sh sepolicy.rule customize.sh uninstall.sh; do
+          for f in module.prop post-fs-data.sh service.sh sepolicy.rule customize.sh uninstall.sh action.sh; do
             [ -f "$f" ] && cp "$f" zip_root/
           done
+          [ -f zip_root/action.sh ] && chmod 755 zip_root/action.sh
           # 不打包 system.prop；不打包 system/ 目录
           if [ -d webroot ]; then
             cp -a webroot zip_root/

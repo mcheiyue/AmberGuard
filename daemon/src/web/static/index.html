@@ -201,14 +201,11 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       <div class="card" id="readyCard" style="display:none">
         <h2>上手检查</h2>
         <ul class="tips" id="readySteps" style="margin:0"></ul>
-        <div class="btns" style="margin-top:10px;flex-direction:column">
-          <button type="button" class="primary" style="width:100%" onclick="doInit(false)">保存默认配置</button>
-          <button type="button" style="width:100%" onclick="tab('set');scanAps()">去配置家网</button>
-        </div>
+        <div class="btns" id="readyActions" style="margin-top:10px;flex-direction:column"></div>
       </div>
       <div class="card" id="initCard" style="display:none">
         <h2>开始配置</h2>
-        <p class="note" style="margin-top:0">尚未保存配置。将写入<strong>日用默认</strong>（自动切换、弱信号关闭）。双路由/Mesh 请再去「设置」扫描勾选家网。</p>
+        <p class="note" style="margin-top:0">尚未落盘。将写入<strong>运行默认</strong>（mode=日用、弱信号关）。双路由请再去「设置」勾选家网。</p>
         <div class="btns" style="flex-direction:column">
           <button type="button" class="primary" style="width:100%" onclick="doInit(false)">初始化并开始</button>
           <button type="button" style="width:100%" onclick="doInit(true)">初始化并去配置家网</button>
@@ -216,12 +213,12 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       </div>
       <div class="card" id="homeTipCard" style="display:none">
         <h2>家网未配置</h2>
-        <p class="note" style="margin-top:0">已在运行，但未勾选家网 AP。多路由环境下可能切到信号最强但非预期的热点。</p>
+        <p class="note" style="margin-top:0">可选。多路由不勾选可能切到非预期热点。</p>
         <button type="button" class="primary" style="width:100%" onclick="tab('set');scanAps()">去设置扫描家网</button>
         <button type="button" style="width:100%;margin-top:8px" onclick="addCurrentHome()">一键加入当前连接</button>
       </div>
       <div class="card">
-        <h2>模式</h2>
+        <h2>运行模式</h2>
         <div class="btns" id="modeBtns">
           <button type="button" data-mode="daily" class="primary" onclick="mode('daily')">日用</button>
           <button type="button" data-mode="eco" onclick="mode('eco')">省电</button>
@@ -230,7 +227,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="btns" style="margin-top:8px">
           <button type="button" onclick="softPause(20)">观影 20 分钟</button>
         </div>
-        <p class="note detail">省电=更长防抖、更稀扫描；观影=临时 hold。异名双频须在系统分别保存。</p>
+        <p class="note detail">运行模式≠阈值页「均衡/更稳/更敏」。省电=更长防抖、更稀扫描；暂停=不自动切；观影=临时 hold。</p>
       </div>
       <div class="card">
         <h2>最近切换</h2>
@@ -241,7 +238,8 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
     <!-- 阈值 -->
     <section class="page" id="p-cfg">
       <div class="card">
-        <h2>阈值 · 热更新</h2>
+        <h2>阈值档 · 热更新</h2>
+        <p class="note detail" style="margin-top:0">只改三个分数/RSSI，不改「运行模式」。可与日用/省电任意组合。</p>
         <p class="note detail" style="margin-top:0">先选预设再微调。改完点保存即写入 config.toml。</p>
         <div class="btns" id="presets"></div>
         <div id="fields"></div>
@@ -301,6 +299,17 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
             <option value="debug">debug</option>
           </select>
         </div>
+      </div>
+      <div class="card">
+        <h2>关于</h2>
+        <div class="row"><span class="k">版本</span><span class="v" id="aboutVer">v0.5.0</span></div>
+        <div class="row"><span class="k">面板</span><span class="v">127.0.0.1:8080</span></div>
+        <div class="row"><span class="k">日志</span><span class="v" style="font-size:11px">/data/adb/amberguard/log/amberguard.log</span></div>
+        <p class="note" style="margin-top:10px">
+          <a href="https://github.com/mcheiyue/AmberGuard" target="_blank" rel="noopener" style="color:var(--amber)">GitHub 仓库</a>
+          · 面具点「操作」可看一行状态
+        </p>
+        <p class="note detail">运行模式：日用/省电/暂停控制「会不会切、多勤快」。阈值档：均衡/更稳/更敏只改触发分数。</p>
       </div>
       <div class="card">
         <h2>家网</h2>
@@ -514,6 +523,20 @@ async function addCurrentHome() {
   }
 }
 
+function fmtLocal(tsUnix) {
+  const t = new Date((tsUnix || 0) * 1000);
+  if (isNaN(t.getTime()) || !tsUnix) return '—';
+  try {
+    return t.toLocaleString('zh-CN', {
+      month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour12: false
+    });
+  } catch (_) {
+    return t.toLocaleString();
+  }
+}
+
 async function loadHistory() {
   try {
     const r = await fetch('/api/history', { cache: 'no-store' });
@@ -523,8 +546,7 @@ async function loadHistory() {
     const evs = j.events || [];
     if (!evs.length) { box.textContent = '暂无'; return; }
     box.innerHTML = evs.slice(0, 10).map(e => {
-      const t = new Date((e.ts_unix || 0) * 1000);
-      const ts = isNaN(t.getTime()) ? '' : t.toLocaleTimeString();
+      const ts = fmtLocal(e.ts_unix);
       return '<div style="padding:4px 0;border-bottom:1px solid var(--line)">' +
         ts + ' · ' + (e.reason || '') + ' · ' + (e.from_ssid || '?') + '→' + (e.to_ssid || '?') +
         ' · ' + (e.result || '') + ' · ' + (e.duration_ms || 0) + 'ms</div>';
@@ -538,20 +560,44 @@ async function loadReadiness() {
     const j = await r.json();
     const card = $('readyCard');
     const ul = $('readySteps');
+    const acts = $('readyActions');
     if (!card || !ul) return;
     const steps = j.steps || [];
     const bad = steps.filter(s => !s.ok);
-    // 简洁：只显示未完成；全部 ok 则藏
-    if (!bad.length && j.persisted) {
+    const badCrit = bad.filter(s => s.id !== 'home'); // 家网交给 homeTip，不占上手检查
+
+    // Bug 修复：与 initCard / homeTip 分工，避免三卡叠显
+    // - 未落盘 → 只显示 initCard
+    // - 仅缺家网 → 只显示 homeTip
+    // - 缺双频等关键项 → 上手检查
+    if (!j.persisted) {
+      card.style.display = 'none';
+      return;
+    }
+    if (!badCrit.length) {
       card.style.display = 'none';
       return;
     }
     card.style.display = 'block';
-    const show = document.documentElement.classList.contains('compact') ? bad : steps;
-    ul.innerHTML = (show.length ? show : steps).map(s =>
+    const show = document.documentElement.classList.contains('compact') ? badCrit : steps.map(s => {
+      // 已落盘时 persist 步可弱化：compact 已滤；详细模式仍列出
+      return s;
+    });
+    const list = document.documentElement.classList.contains('compact') ? badCrit : steps;
+    ul.innerHTML = list.map(s =>
       '<li style="color:' + (s.ok ? 'var(--ok)' : 'var(--warn)') + '">' +
       (s.ok ? '✓ ' : '○ ') + s.title + ' — ' + (s.hint || '') + '</li>'
     ).join('');
+    if (acts) {
+      const needDual = badCrit.some(s => s.id === 'system_dual');
+      let html = '';
+      // 已落盘：不再出现「保存默认配置」
+      if (needDual) {
+        html += '<p class="note" style="margin:0 0 8px">请在系统设置连接并保存 2.4G 与 5G（可同名不同后缀）</p>';
+      }
+      html += '<button type="button" style="width:100%" onclick="tab(\'set\');scanAps()">去配置家网</button>';
+      acts.innerHTML = html;
+    }
   } catch (_) { /* ignore */ }
 }
 

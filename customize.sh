@@ -1,5 +1,6 @@
 #!/system/bin/sh
-# 安装时：探测网卡；无配置则写默认；有配置则音量键选保留/重置（超时=保留）
+# 安装：建目录；首次不预写 config（交给面板初始化）
+# 已有配置：音量+保留 / 音量-备份后删除（像新装）/ 超时保留
 
 AG_DIR=/data/adb/amberguard
 CONFIG=$AG_DIR/config.toml
@@ -21,27 +22,16 @@ elif [ -d /sys/class/net ]; then
   done
 fi
 ui_print "- interface: $WLAN"
+# 供面板/文档参考；不强制写进 config
+echo "$WLAN" >"$AG_DIR/iface.guess" 2>/dev/null
 
-write_default_config() {
-  cat >"$CONFIG" <<EOF
-interface = "$WLAN"
-listen = "127.0.0.1:8080"
-upswitch_rssi_min_dbm = -65
-score_detect_threshold = 70.0
-score_switch_threshold = 30.0
-mode = "daily"
-log_level = "info"
-EOF
-}
-
-# 音量键：0=保留(+)  1=重置(-)  超时/失败=0
-# ponytail: 无 getevent/timeout 则直接保留，不半残卡死安装
+# 音量键：0=保留  1=重置(删配置)  超时/失败=0
 vk_keep_or_reset() {
   local wait_s=8
   ui_print " "
   ui_print "- 检测到已有配置 $CONFIG"
   ui_print "- 音量加(+)：保留配置并更新模块（推荐）"
-  ui_print "- 音量减(-)：备份后写入日用默认"
+  ui_print "- 音量减(-)：备份后删除配置（等同新装，进面板初始化）"
   ui_print "- ${wait_s}s 无按键 → 保留"
   ui_print " "
 
@@ -59,20 +49,18 @@ vk_keep_or_reset() {
     return 0
   fi
 
-  # 有 timeout 用短轮询；没有则 sleep 循环 + 后台 getevent
   local has_timeout=0
   if command -v timeout >/dev/null 2>&1; then
     has_timeout=1
   fi
 
-  local end t line
+  local end line
   end=$(( $(date +%s) + wait_s ))
   while [ "$(date +%s)" -lt "$end" ]; do
     line=""
     if [ "$has_timeout" = 1 ]; then
       line=$(timeout 1 "$GETEVENT" -qlc 1 2>/dev/null | grep KEY_VOLUME | head -n 1)
     else
-      # 后台读一行，1s 后杀掉
       line=$("$GETEVENT" -qlc 1 2>/dev/null | grep KEY_VOLUME | head -n 1 &)
       sleep 1
     fi
@@ -82,7 +70,7 @@ vk_keep_or_reset() {
         return 0
         ;;
       *KEY_VOLUMEDOWN*|*VOLUME_DOWN*)
-        ui_print "- 已选：重置配置"
+        ui_print "- 已选：重置（删除配置）"
         return 1
         ;;
     esac
@@ -92,8 +80,7 @@ vk_keep_or_reset() {
 }
 
 if [ ! -f "$CONFIG" ]; then
-  write_default_config
-  ui_print "- wrote $CONFIG"
+  ui_print "- 无配置文件：不预写，首次请开 WebUI 初始化"
 else
   if vk_keep_or_reset; then
     ui_print "- keep existing config"
@@ -101,8 +88,8 @@ else
     ts=$(date +%Y%m%d%H%M%S 2>/dev/null || echo old)
     bak="${CONFIG}.bak.${ts}"
     cp -f "$CONFIG" "$bak" 2>/dev/null && ui_print "- backup → $bak"
-    write_default_config
-    ui_print "- reset config (defaults, interface=$WLAN)"
+    rm -f "$CONFIG"
+    ui_print "- removed config（下次启动等同新装引导）"
   fi
 fi
 

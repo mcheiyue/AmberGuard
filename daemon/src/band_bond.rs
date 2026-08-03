@@ -106,6 +106,46 @@ pub fn parse_scan_results(raw: &str) -> Vec<ScanAp> {
     out
 }
 
+/// 系统已保存「可双频切换」的网络对：同 stem 不同 SSID，或至少 2 个不同 SSID
+pub fn dual_band_pair_saved(ssids: &[String]) -> (bool, String) {
+    let mut uniq = Vec::new();
+    for s in ssids {
+        let t = s.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if !uniq.iter().any(|u: &String| u == t) {
+            uniq.push(t.to_string());
+        }
+    }
+    if uniq.len() < 2 {
+        return (
+            false,
+            if uniq.is_empty() {
+                "未读到已保存网络（请先在系统连过 WiFi）".into()
+            } else {
+                format!("仅 1 个：{}；请再保存对端频段", uniq[0])
+            },
+        );
+    }
+    for i in 0..uniq.len() {
+        for j in (i + 1)..uniq.len() {
+            let a = &uniq[i];
+            let b = &uniq[j];
+            let sa = ssid_stem(a);
+            let sb = ssid_stem(b);
+            if a != b && !sa.is_empty() && sa == sb {
+                return (true, format!("配对 {a} ↔ {b}"));
+            }
+        }
+    }
+    // 弱通过：有 ≥2 个不同名（非标准命名仍可 SELECT）
+    (
+        true,
+        format!("已保存 {} 个网络（未识别同名双频后缀）", uniq.len()),
+    )
+}
+
 /// 归一化：去 5G/2.4G/CLONE 等后缀，便于启发式配对
 pub fn ssid_stem(ssid: &str) -> String {
     let mut s = ssid.to_string();

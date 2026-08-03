@@ -8,7 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::band_bond::{
-    best_on_band, link_in_home, network_id_for_ssid, parse_list_networks, parse_scan_results,
+    best_on_band, dual_band_pair_saved, link_in_home, network_id_for_ssid, parse_list_networks,
+    parse_scan_results,
     scan_views,
 };
 use crate::config::{Config, ConfigPatch};
@@ -210,42 +211,36 @@ fn main() {
                             .filter(|s| !s.is_empty())
                             .collect::<Vec<_>>()
                     };
-                    let dual_ok = saved.len() >= 2;
+                    let (dual_ok, dual_hint) = dual_band_pair_saved(&saved);
                     let snap = snapshot_http.lock().unwrap();
-                    let mut steps = vec![
+                    let steps = vec![
                         ReadyStep {
                             id: "persist".into(),
                             ok: persisted,
-                            title: "保存日用配置".into(),
+                            title: "保存配置".into(),
                             hint: if persisted {
                                 "config.toml 已存在".into()
                             } else {
-                                "点「初始化」写入默认配置".into()
+                                "点下方「初始化」写入默认并落盘".into()
                             },
                         },
                         ReadyStep {
                             id: "system_dual".into(),
                             ok: dual_ok,
                             title: "系统已保存双频网络".into(),
-                            hint: if dual_ok {
-                                format!("已保存 {} 个网络", saved.len())
-                            } else {
-                                "请在系统设置分别连接并保存 5G 与 2.4G".into()
-                            },
+                            hint: dual_hint,
                         },
                         ReadyStep {
                             id: "home".into(),
                             ok: home_n > 0,
-                            title: "勾选家网 AP".into(),
+                            title: "勾选家网 AP（建议）".into(),
                             hint: if home_n > 0 {
                                 format!("已选 {home_n} 个")
                             } else {
-                                "多路由建议扫描勾选；空=启发式".into()
+                                "可选；多路由强烈建议。空=不限制".into()
                             },
                         },
                     ];
-                    // 简洁：compact 前端可只显示 !ok
-                    let _ = &mut steps;
                     let body = Readiness {
                         persisted,
                         home_configured: home_n > 0,
@@ -789,7 +784,7 @@ fn main() {
                 s.user_hold_secs = hold_secs;
                 s.home_ap_count = home_aps.len();
                 s.in_home = in_home_now;
-                s.block_reason = block_reason;
+                s.block_reason = block_reason.clone();
                 s.penalty_remaining_secs = pen_rem;
                 s.screen = if screen_off { "OFF" } else { "ON" }.into();
                 s.thresholds = ThresholdsView {
@@ -811,6 +806,24 @@ fn main() {
                         s.power_state = format!("{:?}", sm.state);
                     }
                 }
+                // 面具 action.sh 可读的一行状态
+                let line = format!(
+                    "AmberGuard | {} | {} | {} | score={:.0} | {}\n",
+                    mode,
+                    if ssid_now.is_empty() {
+                        "-"
+                    } else {
+                        ssid_now.as_str()
+                    },
+                    band,
+                    score,
+                    if block_reason.is_empty() {
+                        s.power_state.as_str()
+                    } else {
+                        block_reason.as_str()
+                    }
+                );
+                let _ = std::fs::write("/data/adb/amberguard/status.txt", line);
             }
 
             // 息屏：只更新状态，不 SCAN/不切换

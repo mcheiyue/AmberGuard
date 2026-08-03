@@ -285,25 +285,26 @@ impl Config {
 
     pub fn presets() -> Vec<PresetMeta> {
         vec![
+            // 与运行 mode（日用/省电/暂停）正交：这里只改三个阈值数字
             PresetMeta {
                 id: "daily",
-                label: "日用（默认）",
-                desc: "视频/网页：下切偏稳、上切更稳。推荐起步。",
+                label: "均衡（推荐）",
+                desc: "阈值默认档：detect70 / switch30 / 上切-65。与「运行模式·日用」无关。",
                 score_detect_threshold: 70.0,
                 score_switch_threshold: 30.0,
                 upswitch_rssi_min_dbm: -65,
             },
             PresetMeta {
                 id: "stable",
-                label: "更稳（少切网）",
-                desc: "能扛再切：检测与下切都更靠后，适合嫌切换打断的人。",
+                label: "更稳（少切）",
+                desc: "检测与下切都更靠后，嫌切换打断时用。",
                 score_detect_threshold: 60.0,
                 score_switch_threshold: 22.0,
                 upswitch_rssi_min_dbm: -58,
             },
             PresetMeta {
                 id: "sensitive",
-                label: "更敏（早切 2.4G）",
+                label: "更敏（早切）",
                 desc: "信号一差就准备下切，卡顿少、切网可能略多。",
                 score_detect_threshold: 78.0,
                 score_switch_threshold: 42.0,
