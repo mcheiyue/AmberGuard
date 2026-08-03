@@ -1,6 +1,6 @@
 id=AmberGuard
 name=AmberGuard
-version=v0.5.1
-versionCode=51
+version=v0.5.2
+versionCode=52
 author=mcheiyue
-description=WiFi 双频守护 · 点「操作」看状态 · WebUI 127.0.0.1:8080
+description=WiFi 双频守护 · 运行后此处显示 mode/SSID/score · 点操作刷新

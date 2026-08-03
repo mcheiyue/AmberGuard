@@ -29,6 +29,76 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// 把一行状态写入模块 module.prop 的 description=（面具列表展示）
+fn update_module_description(line: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = unix_now();
+    let prev = LAST.load(Ordering::Relaxed);
+    if now.saturating_sub(prev) < 15 {
+        return;
+    }
+    LAST.store(now, Ordering::Relaxed);
+
+    let prop = module_prop_path();
+    let Some(prop) = prop else {
+        return;
+    };
+    let Ok(raw) = std::fs::read_to_string(&prop) else {
+        return;
+    };
+    // 单行、去掉 description 非法字符
+    let desc: String = line
+        .chars()
+        .map(|c| match c {
+            '\n' | '\r' | '#' | '=' => ' ',
+            c => c,
+        })
+        .take(96)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if desc.is_empty() {
+        return;
+    }
+    let mut out = String::with_capacity(raw.len() + 32);
+    let mut replaced = false;
+    for l in raw.lines() {
+        if l.starts_with("description=") {
+            out.push_str("description=");
+            out.push_str(&desc);
+            out.push('\n');
+            replaced = true;
+        } else {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    if !replaced {
+        out.push_str("description=");
+        out.push_str(&desc);
+        out.push('\n');
+    }
+    let _ = std::fs::write(prop, out);
+}
+
+fn module_prop_path() -> Option<std::path::PathBuf> {
+    // /data/adb/modules/AmberGuard/bin/amberguard → ../module.prop
+    let exe = std::fs::read_link("/proc/self/exe").ok()?;
+    let mod_dir = exe.parent()?.parent()?;
+    let p = mod_dir.join("module.prop");
+    if p.is_file() {
+        Some(p)
+    } else {
+        let fallback = std::path::PathBuf::from("/data/adb/modules/AmberGuard/module.prop");
+        if fallback.is_file() {
+            Some(fallback)
+        } else {
+            None
+        }
+    }
+}
+
 fn push_history(hist: &Arc<Mutex<VecDeque<SwitchEvent>>>, ev: SwitchEvent) {
     if let Ok(mut h) = hist.lock() {
         h.push_front(ev);
@@ -809,24 +879,27 @@ fn main() {
                         s.power_state = format!("{:?}", sm.state);
                     }
                 }
-                // 面具 action.sh 可读的一行状态
+                // 面具 action / 列表 description 用的一行状态
+                let st_label = if block_reason.is_empty() {
+                    s.power_state.as_str()
+                } else {
+                    block_reason.as_str()
+                };
                 let line = format!(
-                    "AmberGuard | {} | {} | {} | score={:.0} | {}\n",
-                    mode,
+                    "[{mode}] {} {band} score={:.0} · {st_label}",
                     if ssid_now.is_empty() {
                         "-"
                     } else {
                         ssid_now.as_str()
                     },
-                    band,
                     score,
-                    if block_reason.is_empty() {
-                        s.power_state.as_str()
-                    } else {
-                        block_reason.as_str()
-                    }
                 );
-                let _ = std::fs::write("/data/adb/amberguard/status.txt", line);
+                let _ = std::fs::write(
+                    "/data/adb/amberguard/status.txt",
+                    format!("{line}\n"),
+                );
+                // 限频写 module.prop description（列表可见；管理器不一定实时刷，点操作/重进会新）
+                update_module_description(&line);
             }
 
             // 息屏：只更新状态，不 SCAN/不切换
