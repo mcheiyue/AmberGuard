@@ -19,8 +19,15 @@
   --amber:#c47a18;--amber-dim:#a06010;--cyan:#1a9a9a;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:14px/1.45 var(--font)}
-body{padding-bottom:calc(var(--tab-h) + var(--safe-b))}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--fg);font:14px/1.45 var(--font)}
+/* 底栏高度 + 安全区 + 余量，避免最后一张卡被挡 */
+body{padding-bottom:calc(var(--tab-h) + var(--safe-b) + 20px);scroll-padding-bottom:calc(var(--tab-h) + var(--safe-b) + 20px)}
+/* 简洁模式：藏说明文案 */
+html.compact .meaning,
+html.compact .guide,
+html.compact .tips-card,
+html.compact .note.detail{display:none!important}
+html.compact .field{margin:8px 0;padding-bottom:8px}
 /* 频谱氛围底 */
 .aura{position:fixed;inset:0;pointer-events:none;z-index:0;
   background:
@@ -49,7 +56,7 @@ header.top{
 .pill.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%, var(--line))}
 .pill.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%, var(--line))}
 
-main{padding:12px 14px 24px}
+main{padding:12px 14px 32px}
 .page{display:none}
 .page.on{display:block;animation:in .28s ease}
 @keyframes in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
@@ -135,6 +142,14 @@ nav.tabs button{
 nav.tabs button.on{color:var(--amber)}
 nav.tabs button .ic{font-size:16px;line-height:1;font-style:normal}
 nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
+.banner{
+  display:none;margin:0 14px 10px;padding:10px 12px;border-radius:12px;
+  border:1px solid color-mix(in srgb,var(--warn) 45%, var(--line));
+  background:color-mix(in srgb,var(--warn) 12%, var(--panel));
+  color:var(--fg);font-size:13px;align-items:center;justify-content:space-between;gap:10px;
+}
+.banner.on{display:flex}
+.banner .btns{margin:0}
 </style>
 </head>
 <body>
@@ -152,6 +167,15 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
   </header>
 
   <main>
+    <div class="banner" id="holdBanner">
+      <div>
+        <strong>手动切网保护中</strong>
+        <div class="note" style="margin:2px 0 0" id="holdText">守护暂停，避免抢回你的选择</div>
+      </div>
+      <div class="btns">
+        <button class="primary" type="button" onclick="clearHold()">立即恢复</button>
+      </div>
+    </div>
     <!-- 状态 -->
     <section class="page on" id="p-status">
       <div class="card">
@@ -163,23 +187,54 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
             <div class="bar"><i id="hbar"></i></div>
           </div>
           <div class="metric">
-            <div class="lab">RSSI</div>
+            <div class="lab">信号</div>
             <div class="num cyan" id="rssi">—</div>
             <span class="band-chip g24" id="bandchip">—</span>
           </div>
         </div>
-        <div class="row" style="margin-top:10px"><span class="k">SSID</span><span class="v" id="ssid">—</span></div>
-        <div class="row"><span class="k">wpa</span><span class="v" id="wpa_state">—</span></div>
-        <div class="row"><span class="k">状态机</span><span class="v" id="sm">—</span></div>
+        <div class="row" style="margin-top:10px"><span class="k">网络名</span><span class="v" id="ssid">—</span></div>
+        <div class="row"><span class="k">连接</span><span class="v" id="wpa_state" title="">—</span></div>
+        <div class="row"><span class="k">守护</span><span class="v" id="sm" title="">—</span></div>
         <p class="err" id="err"></p>
+        <p class="note" id="reasonBar" style="display:none;margin:8px 0 0;color:var(--warn)"></p>
+      </div>
+      <div class="card" id="readyCard" style="display:none">
+        <h2>上手检查</h2>
+        <ul class="tips" id="readySteps" style="margin:0"></ul>
+        <div class="btns" style="margin-top:10px;flex-direction:column">
+          <button type="button" class="primary" style="width:100%" onclick="doInit(false)">保存默认配置</button>
+          <button type="button" style="width:100%" onclick="tab('set');scanAps()">去配置家网</button>
+        </div>
+      </div>
+      <div class="card" id="initCard" style="display:none">
+        <h2>开始配置</h2>
+        <p class="note" style="margin-top:0">尚未保存配置。将写入<strong>日用默认</strong>（自动切换、弱信号关闭）。双路由/Mesh 请再去「设置」扫描勾选家网。</p>
+        <div class="btns" style="flex-direction:column">
+          <button type="button" class="primary" style="width:100%" onclick="doInit(false)">初始化并开始</button>
+          <button type="button" style="width:100%" onclick="doInit(true)">初始化并去配置家网</button>
+        </div>
+      </div>
+      <div class="card" id="homeTipCard" style="display:none">
+        <h2>家网未配置</h2>
+        <p class="note" style="margin-top:0">已在运行，但未勾选家网 AP。多路由环境下可能切到信号最强但非预期的热点。</p>
+        <button type="button" class="primary" style="width:100%" onclick="tab('set');scanAps()">去设置扫描家网</button>
+        <button type="button" style="width:100%;margin-top:8px" onclick="addCurrentHome()">一键加入当前连接</button>
       </div>
       <div class="card">
         <h2>模式</h2>
-        <div class="btns">
-          <button class="primary" onclick="mode('daily')">日用（自动）</button>
-          <button onclick="mode('pause')">暂停守护</button>
+        <div class="btns" id="modeBtns">
+          <button type="button" data-mode="daily" class="primary" onclick="mode('daily')">日用</button>
+          <button type="button" data-mode="eco" onclick="mode('eco')">省电</button>
+          <button type="button" data-mode="pause" onclick="mode('pause')">暂停</button>
         </div>
-        <p class="note">暂停后只刷新状态、不切网。异名双频须在系统设置分别保存 5G 与 2.4G。</p>
+        <div class="btns" style="margin-top:8px">
+          <button type="button" onclick="softPause(20)">观影 20 分钟</button>
+        </div>
+        <p class="note detail">省电=更长防抖、更稀扫描；观影=临时 hold。异名双频须在系统分别保存。</p>
+      </div>
+      <div class="card">
+        <h2>最近切换</h2>
+        <div id="histList" class="note" style="font-size:12px;font-family:var(--mono)">暂无</div>
       </div>
     </section>
 
@@ -187,7 +242,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
     <section class="page" id="p-cfg">
       <div class="card">
         <h2>阈值 · 热更新</h2>
-        <p class="note" style="margin-top:0">先选预设再微调。改完点保存即写入 config.toml。</p>
+        <p class="note detail" style="margin-top:0">先选预设再微调。改完点保存即写入 config.toml。</p>
         <div class="btns" id="presets"></div>
         <div id="fields"></div>
         <div class="btns">
@@ -197,7 +252,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <p class="okm" id="cfgMsg"></p>
         <p class="err" id="cfgErr"></p>
       </div>
-      <div class="card">
+      <div class="card tips-card">
         <h2>上手</h2>
         <ul class="tips" id="tips"></ul>
       </div>
@@ -221,23 +276,99 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       <div class="card">
         <h2>外观</h2>
         <div class="setting-row">
-          <div><div>主题</div><div class="note" style="margin:0">深色适合夜间；浅色适合白天</div></div>
+          <div><div>主题</div><div class="note detail" style="margin:0">深色适合夜间；浅色适合白天</div></div>
           <select id="themeSel" onchange="setTheme(this.value)">
             <option value="dark">深色</option>
             <option value="light">浅色</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <div><div>界面密度</div><div class="note detail" style="margin:0">简洁隐藏说明文字，界面更干净</div></div>
+          <select id="denseSel" onchange="setDense(this.value)">
+            <option value="compact">简洁</option>
+            <option value="full">详细</option>
           </select>
         </div>
       </div>
       <div class="card">
         <h2>日志级别</h2>
         <div class="setting-row">
-          <div><div>输出级别</div><div class="note" style="margin:0">debug 更啰嗦，error 只记故障</div></div>
+          <div><div>输出级别</div><div class="note detail" style="margin:0">debug 更啰嗦，error 只记故障</div></div>
           <select id="logLevel" onchange="saveLogLevel()">
             <option value="error">error</option>
             <option value="warn">warn</option>
             <option value="info">info</option>
             <option value="debug">debug</option>
           </select>
+        </div>
+      </div>
+      <div class="card">
+        <h2>家网</h2>
+        <p class="note detail" style="margin-top:0">扫描并勾选属于你的 AP（按 BSSID）。配置后只在家网内双频切换；空=兼容旧启发式。</p>
+        <div class="btns">
+          <button class="primary" type="button" onclick="scanAps()">扫描附近 AP</button>
+          <button type="button" onclick="addCurrentHome()">当前加入</button>
+          <button type="button" onclick="saveHomeAps()">保存家网</button>
+          <button type="button" onclick="clearHomeAps()">清空家网</button>
+        </div>
+        <p class="note" id="homeSummary" style="margin-top:8px">已选 0 个</p>
+        <div id="scanList" style="margin-top:10px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--panel2);font-size:12px;display:none">
+          <div id="scanItems"></div>
+        </div>
+        <p class="okm" id="scanMsg"></p>
+        <p class="err" id="scanErr"></p>
+      </div>
+      <div class="card">
+        <h2>手动切网保护</h2>
+        <p class="note detail" style="margin-top:0">系统里手动换 WiFi/AP 后，自动暂停切换，避免守护立刻抢回。0=关闭。</p>
+        <div class="field" style="border:0;padding-bottom:0;margin-bottom:0">
+          <label>保护时长 <span class="def">默认 60 秒</span></label>
+          <p class="meaning"><strong>含义：</strong>检测到链路非守护发起的变化后，暂停自动切换的秒数。</p>
+          <p class="guide"><strong>怎么调：</strong>日常 60；想多调一会儿再自动可 120–180；0 关闭。</p>
+          <div class="ctrl">
+            <input type="range" id="holdSecs" min="0" max="300" step="5" value="60" oninput="onHoldSlide()">
+            <span class="val" id="holdSecsVal">60</span>
+          </div>
+        </div>
+        <div class="btns">
+          <button class="primary" type="button" onclick="saveHoldSecs()">保存保护时长</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>弱信号断开</h2>
+        <p class="note detail" style="margin-top:0">默认关闭。开启后：信号持续极差时<strong>先</strong>换更强 AP 或下切 2.4，仍无更好选择才断 WiFi。暂停、手动保护、非家网时不下手。</p>
+        <div class="setting-row">
+          <div><div>启用</div><div class="note detail" style="margin:0">关闭=只做频段切换；开启=先切换再断开</div></div>
+          <select id="weakAction" onchange="onWeakUi()">
+            <option value="off">关闭（推荐）</option>
+            <option value="disconnect">先切换再断开</option>
+          </select>
+        </div>
+        <div id="weakExtra">
+          <div class="field">
+            <label>断开 RSSI <span class="def">默认 -90</span></label>
+            <div class="ctrl">
+              <input type="range" id="weakRssi" min="-95" max="-70" step="1" value="-90" oninput="$('weakRssiVal').textContent=this.value">
+              <span class="val" id="weakRssiVal">-90</span>
+            </div>
+          </div>
+          <div class="field">
+            <label>持续秒数 <span class="def">默认 15</span></label>
+            <div class="ctrl">
+              <input type="range" id="weakHold" min="5" max="60" step="1" value="15" oninput="$('weakHoldVal').textContent=this.value">
+              <span class="val" id="weakHoldVal">15</span>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div><div>断后自动重连</div><div class="note detail" style="margin:0">信号回升后自动重连</div></div>
+            <select id="autoRec">
+              <option value="true">开</option>
+              <option value="false">关</option>
+            </select>
+          </div>
+        </div>
+        <div class="btns">
+          <button class="primary" type="button" onclick="saveWeak()">保存弱信号设置</button>
         </div>
         <p class="okm" id="setMsg"></p>
         <p class="err" id="setErr"></p>
@@ -265,6 +396,51 @@ const $ = (id) => document.getElementById(id);
 let cfgCache = null;
 let dirty = false;
 
+/** wpa 连接态 → 中文（title 保留原文） */
+function labelWpa(s) {
+  if (!s) return '—';
+  const u = String(s).toUpperCase();
+  const map = {
+    COMPLETED: '已连接',
+    DISCONNECTED: '未连接',
+    INACTIVE: '未激活',
+    SCANNING: '扫描中',
+    AUTHENTICATING: '认证中',
+    ASSOCIATING: '关联中',
+    ASSOCIATED: '已关联',
+    '4WAY_HANDSHAKE': '握手中',
+    GROUP_HANDSHAKE: '组握手',
+    INTERFACE_DISABLED: '网卡禁用',
+    OFFLINE: '离线'
+  };
+  return map[u] || s;
+}
+
+/** 守护/状态机 → 中文 */
+function labelSm(s) {
+  if (!s) return '—';
+  const raw = String(s);
+  const m = raw.match(/^USER_HOLD\((\d+)s\)$/i);
+  if (m) return '手动保护（' + m[1] + '秒）';
+  const map = {
+    Idle: '待命',
+    GradientDetect: '观察中',
+    Switching: '切换中',
+    Penalty: '冷却中',
+    Frozen: '冻结',
+    PAUSE: '已暂停',
+    ON: '运行中',
+    OUT_OF_HOME: '非家网',
+    WEAK_OFF: '弱信号已断开',
+    SCREEN_OFF: '息屏降频',
+    OFFLINE: '离线'
+  };
+  if (map[raw]) return map[raw];
+  // Debug 打印的 State::Xxx
+  const bare = raw.replace(/^State::/, '');
+  return map[bare] || raw;
+}
+
 function tab(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('on'));
   document.querySelectorAll('nav.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
@@ -278,11 +454,17 @@ function tab(name) {
 function setTheme(t) {
   document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
   localStorage.setItem('ag_theme', t);
-  $('themeSel').value = t;
+  if ($('themeSel')) $('themeSel').value = t;
+}
+function setDense(mode) {
+  const compact = mode !== 'full';
+  document.documentElement.classList.toggle('compact', compact);
+  localStorage.setItem('ag_dense', compact ? 'compact' : 'full');
+  if ($('denseSel')) $('denseSel').value = compact ? 'compact' : 'full';
 }
 (function initTheme() {
-  const t = localStorage.getItem('ag_theme') || 'dark';
-  setTheme(t);
+  setTheme(localStorage.getItem('ag_theme') || 'dark');
+  setDense(localStorage.getItem('ag_dense') || 'compact');
 })();
 
 function markDirty() {
@@ -294,9 +476,83 @@ function markDirty() {
 async function mode(m) {
   try {
     await fetch('/api/mode/' + m, { method: 'POST', cache: 'no-store' });
+    highlightMode(m);
     tick();
     loadConfig();
   } catch (e) { $('err').textContent = e.message; }
+}
+
+function highlightMode(m) {
+  document.querySelectorAll('#modeBtns button').forEach(b => {
+    b.classList.toggle('primary', b.dataset.mode === m);
+  });
+}
+
+async function softPause(mins) {
+  try {
+    await fetch('/api/soft-pause?mins=' + (mins || 20), { method: 'POST', cache: 'no-store' });
+    tick();
+  } catch (e) { $('err').textContent = e.message; }
+}
+
+async function addCurrentHome() {
+  try {
+    const r = await fetch('/api/status', { cache: 'no-store' });
+    const j = await r.json();
+    if (!j.bssid) throw new Error('当前无 BSSID');
+    const key = String(j.bssid).toLowerCase();
+    homeSelected[key] = {
+      bssid: j.bssid,
+      ssid: j.ssid || '',
+      band: j.band === '5' ? '5' : (j.band === '2.4' ? '2.4' : 'auto')
+    };
+    await saveHomeAps();
+    updateHomeSummary();
+  } catch (e) {
+    if ($('scanErr')) $('scanErr').textContent = e.message;
+    else $('err').textContent = e.message;
+  }
+}
+
+async function loadHistory() {
+  try {
+    const r = await fetch('/api/history', { cache: 'no-store' });
+    const j = await r.json();
+    const box = $('histList');
+    if (!box) return;
+    const evs = j.events || [];
+    if (!evs.length) { box.textContent = '暂无'; return; }
+    box.innerHTML = evs.slice(0, 10).map(e => {
+      const t = new Date((e.ts_unix || 0) * 1000);
+      const ts = isNaN(t.getTime()) ? '' : t.toLocaleTimeString();
+      return '<div style="padding:4px 0;border-bottom:1px solid var(--line)">' +
+        ts + ' · ' + (e.reason || '') + ' · ' + (e.from_ssid || '?') + '→' + (e.to_ssid || '?') +
+        ' · ' + (e.result || '') + ' · ' + (e.duration_ms || 0) + 'ms</div>';
+    }).join('');
+  } catch (_) { /* ignore */ }
+}
+
+async function loadReadiness() {
+  try {
+    const r = await fetch('/api/readiness', { cache: 'no-store' });
+    const j = await r.json();
+    const card = $('readyCard');
+    const ul = $('readySteps');
+    if (!card || !ul) return;
+    const steps = j.steps || [];
+    const bad = steps.filter(s => !s.ok);
+    // 简洁：只显示未完成；全部 ok 则藏
+    if (!bad.length && j.persisted) {
+      card.style.display = 'none';
+      return;
+    }
+    card.style.display = 'block';
+    const show = document.documentElement.classList.contains('compact') ? bad : steps;
+    ul.innerHTML = (show.length ? show : steps).map(s =>
+      '<li style="color:' + (s.ok ? 'var(--ok)' : 'var(--warn)') + '">' +
+      (s.ok ? '✓ ' : '○ ') + s.title + ' — ' + (s.hint || '') + '</li>'
+    ).join('');
+  } catch (_) { /* ignore */ }
 }
 
 function renderFields(api) {
@@ -305,6 +561,8 @@ function renderFields(api) {
   const c = api.config;
   const d = api.defaults;
   for (const f of api.fields) {
+    // 行为类配置放「设置」页，阈值页只留切换相关
+    if (f.key === 'user_hold_secs' || f.key === 'rssi_disconnect_dbm' || f.key === 'weak_hold_secs' || f.key === 'weak_action' || f.key === 'auto_reconnect') continue;
     const cur = c[f.key];
     const def = d[f.key];
     const div = document.createElement('div');
@@ -343,6 +601,56 @@ function renderFields(api) {
   $('cfgMsg').textContent = '';
   if (api.config && api.config.log_level) {
     $('logLevel').value = api.config.log_level;
+  }
+  const homeN = (api.config && api.config.home_aps) ? api.config.home_aps.length : 0;
+  updateGuideCards(!!api.persisted, homeN);
+  syncSettingsForm();
+}
+
+async function doInit(goHome) {
+  const btns = document.querySelectorAll('#initCard button');
+  btns.forEach(b => { b.disabled = true; });
+  try {
+    const r = await fetch('/api/init-config', { method: 'POST', cache: 'no-store' });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    await loadConfig();
+    updateGuideCards(j.persisted !== false, (cfgCache && cfgCache.config && (cfgCache.config.home_aps || []).length) || 0);
+    if (j.initialized) {
+      $('err').textContent = '';
+    }
+    if (goHome) {
+      tab('set');
+      scanAps();
+    } else {
+      tick();
+    }
+  } catch (e) {
+    $('err').textContent = '初始化失败: ' + e.message;
+  } finally {
+    btns.forEach(b => { b.disabled = false; });
+  }
+}
+
+function updateGuideCards(persisted, homeCount) {
+  const initCard = $('initCard');
+  const homeTip = $('homeTipCard');
+  if (initCard) initCard.style.display = persisted ? 'none' : 'block';
+  // 已落盘且无家网：轻提示（初始化卡优先）
+  if (homeTip) {
+    homeTip.style.display = (persisted && homeCount === 0) ? 'block' : 'none';
+  }
+}
+
+async function checkInit() {
+  try {
+    const r = await fetch('/api/config', { cache: 'no-store' });
+    const j = await r.json();
+    const homeN = (j.config && j.config.home_aps) ? j.config.home_aps.length : 0;
+    updateGuideCards(!!j.persisted, homeN);
+  } catch (e) {
+    // 离线：显示初始化卡便于感知
+    updateGuideCards(false, 0);
   }
 }
 
@@ -404,10 +712,41 @@ async function applyPreset(id) {
 
 async function resetDefaults() { await applyPreset('daily'); }
 
+let homeSelected = {}; // bssid -> {bssid,ssid,band}
+
 function syncSettingsForm() {
-  if (cfgCache && cfgCache.config && cfgCache.config.log_level) {
-    $('logLevel').value = cfgCache.config.log_level;
+  if (!cfgCache || !cfgCache.config) return;
+  const c = cfgCache.config;
+  if (c.log_level) $('logLevel').value = c.log_level;
+  if (c.user_hold_secs != null && $('holdSecs')) {
+    $('holdSecs').value = c.user_hold_secs;
+    $('holdSecsVal').textContent = c.user_hold_secs;
   }
+  if (c.weak_action && $('weakAction')) $('weakAction').value = c.weak_action;
+  if (c.rssi_disconnect_dbm != null && $('weakRssi')) {
+    $('weakRssi').value = c.rssi_disconnect_dbm;
+    $('weakRssiVal').textContent = c.rssi_disconnect_dbm;
+  }
+  if (c.weak_hold_secs != null && $('weakHold')) {
+    $('weakHold').value = c.weak_hold_secs;
+    $('weakHoldVal').textContent = c.weak_hold_secs;
+  }
+  if ($('autoRec')) $('autoRec').value = c.auto_reconnect === false ? 'false' : 'true';
+  homeSelected = {};
+  (c.home_aps || []).forEach(h => {
+    if (h.bssid) homeSelected[h.bssid.toLowerCase()] = { bssid: h.bssid, ssid: h.ssid || '', band: h.band || 'auto' };
+  });
+  updateHomeSummary();
+  onWeakUi();
+}
+
+function onWeakUi() {
+  const on = $('weakAction') && $('weakAction').value === 'disconnect';
+  if ($('weakExtra')) $('weakExtra').style.opacity = on ? '1' : '.45';
+}
+
+function onHoldSlide() {
+  $('holdSecsVal').textContent = $('holdSecs').value;
 }
 
 async function saveLogLevel() {
@@ -426,6 +765,129 @@ async function saveLogLevel() {
   } catch (e) {
     $('setMsg').textContent = '';
     $('setErr').textContent = e.message;
+  }
+}
+
+function updateHomeSummary() {
+  const n = Object.keys(homeSelected).length;
+  if ($('homeSummary')) $('homeSummary').textContent = '已选 ' + n + ' 个家网 AP' + (n ? '（保存后生效）' : '（未配置则用启发式）');
+}
+
+async function scanAps() {
+  $('scanErr').textContent = '';
+  $('scanMsg').textContent = '扫描中…';
+  try {
+    const r = await fetch('/api/scan', { method: 'POST', cache: 'no-store' });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    const list = j.aps || [];
+    const items = $('scanItems');
+    items.innerHTML = '';
+    for (const a of list) {
+      const key = (a.bssid || '').toLowerCase();
+      const checked = !!homeSelected[key];
+      const row = document.createElement('label');
+      row.style.cssText = 'display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--line);cursor:pointer';
+      row.innerHTML =
+        '<input type="checkbox" data-bssid="' + key + '" data-ssid="' + (a.ssid || '').replace(/"/g, '&quot;') + '" data-band="' + (a.band || 'auto') + '"' + (checked ? ' checked' : '') + '>' +
+        '<div style="flex:1;min-width:0">' +
+        '<div style="font-weight:600;word-break:break-all">' + (a.ssid || '(隐藏)') + ' · ' + (a.band || '?') + 'G</div>' +
+        '<div style="color:var(--muted);font-family:var(--mono);font-size:11px">' + a.bssid + ' · ' + a.signal + ' dBm</div>' +
+        '</div>';
+      const cb = row.querySelector('input');
+      cb.addEventListener('change', () => {
+        if (cb.checked) homeSelected[key] = { bssid: a.bssid, ssid: a.ssid || '', band: a.band || 'auto' };
+        else delete homeSelected[key];
+        updateHomeSummary();
+      });
+      items.appendChild(row);
+    }
+    $('scanList').style.display = 'block';
+    $('scanMsg').textContent = '扫到 ' + list.length + ' 个，勾选后点「保存家网」';
+    updateHomeSummary();
+  } catch (e) {
+    $('scanMsg').textContent = '';
+    $('scanErr').textContent = e.message;
+  }
+}
+
+async function saveHomeAps() {
+  $('scanErr').textContent = '';
+  try {
+    const home_aps = Object.values(homeSelected);
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ home_aps }),
+      cache: 'no-store'
+    });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    if (j.config) cfgCache = j;
+    $('scanMsg').textContent = '家网已保存（' + home_aps.length + ' 个）';
+    tick();
+  } catch (e) {
+    $('scanErr').textContent = e.message;
+  }
+}
+
+async function clearHomeAps() {
+  homeSelected = {};
+  updateHomeSummary();
+  await saveHomeAps();
+}
+
+async function saveHoldSecs() {
+  $('setErr').textContent = '';
+  try {
+    const v = parseInt($('holdSecs').value, 10) || 0;
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_hold_secs: v }),
+      cache: 'no-store'
+    });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    if (j.config) cfgCache = j;
+    $('setMsg').textContent = v === 0 ? '已关闭手动切网保护' : ('保护时长已设为 ' + v + ' 秒');
+  } catch (e) {
+    $('setMsg').textContent = '';
+    $('setErr').textContent = e.message;
+  }
+}
+
+async function saveWeak() {
+  $('setErr').textContent = '';
+  try {
+    const patch = {
+      weak_action: $('weakAction').value,
+      rssi_disconnect_dbm: parseInt($('weakRssi').value, 10),
+      weak_hold_secs: parseInt($('weakHold').value, 10),
+      auto_reconnect: $('autoRec').value === 'true'
+    };
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+      cache: 'no-store'
+    });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    if (j.config) cfgCache = j;
+    $('setMsg').textContent = patch.weak_action === 'off' ? '弱信号断开已关闭' : '弱信号断开已开启';
+  } catch (e) {
+    $('setMsg').textContent = '';
+    $('setErr').textContent = e.message;
+  }
+}
+
+async function clearHold() {
+  try {
+    await fetch('/api/hold/clear', { method: 'POST', cache: 'no-store' });
+    tick();
+  } catch (e) {
+    $('err').textContent = e.message;
   }
 }
 
@@ -451,7 +913,10 @@ async function clearLogs() {
 
 async function tick() {
   try {
-    const r = await fetch('/api/status', { cache: 'no-store' });
+    const ac = new AbortController();
+    const to = setTimeout(() => ac.abort(), 2500);
+    const r = await fetch('/api/status', { cache: 'no-store', signal: ac.signal });
+    clearTimeout(to);
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
     $('conn').textContent = '在线';
@@ -461,16 +926,72 @@ async function tick() {
     const chip = $('bandchip');
     chip.textContent = band;
     chip.className = 'band-chip ' + (j.band === '5' ? 'g5' : 'g24');
-    $('rssi').textContent = (j.rssi != null ? j.rssi : '—');
-    $('wpa_state').textContent = j.state || '—';
+    $('rssi').textContent = (j.rssi != null ? j.rssi + ' dBm' : '—');
+    const wpaEl = $('wpa_state');
+    wpaEl.textContent = labelWpa(j.state);
+    wpaEl.title = j.state || '';
     const sc = typeof j.score === 'number' ? j.score : 0;
     $('health').textContent = sc.toFixed(0);
     $('hbar').style.width = Math.max(0, Math.min(100, sc)) + '%';
-    $('sm').textContent = j.power_state || '—';
+    const smEl = $('sm');
+    smEl.textContent = labelSm(j.power_state);
+    smEl.title = j.power_state || '';
     $('err').textContent = j.last_error || '';
-    if (j.power_state === 'PAUSE' || (j.thresholds && j.thresholds.mode === 'pause')) {
-      $('conn').textContent = '暂停';
+    const rb = $('reasonBar');
+    if (rb) {
+      const br = j.block_reason || '';
+      if (br) { rb.style.display = 'block'; rb.textContent = br; }
+      else { rb.style.display = 'none'; rb.textContent = ''; }
+    }
+    if (j.thresholds && j.thresholds.mode) highlightMode(j.thresholds.mode);
+    const holdRem = j.hold_remaining_secs || 0;
+    const ban = $('holdBanner');
+    if (holdRem > 0) {
+      ban.classList.add('on');
+      $('holdText').textContent = '还剩 ' + holdRem + ' 秒恢复自动切换';
+      $('conn').textContent = '手动保护';
       $('conn').className = 'pill warn';
+    } else if (j.power_state === 'WEAK_OFF') {
+      ban.classList.add('on');
+      $('holdText').textContent = '弱信号已断开' + (j.last_error ? ' · ' + j.last_error : '');
+      $('conn').textContent = '弱信号断';
+      $('conn').className = 'pill bad';
+    } else if (j.power_state === 'OUT_OF_HOME') {
+      ban.classList.add('on');
+      $('holdText').textContent = '当前不在家网，不自动切换（已选 ' + (j.home_ap_count || 0) + ' 个）';
+      $('conn').textContent = '非家网';
+      $('conn').className = 'pill warn';
+    } else if (j.power_state === 'SCREEN_OFF') {
+      ban.classList.add('on');
+      $('holdText').textContent = '息屏降频中';
+      $('conn').textContent = '息屏';
+      $('conn').className = 'pill';
+    } else {
+      ban.classList.remove('on');
+    }
+    if (j.power_state === 'PAUSE' || (j.thresholds && j.thresholds.mode === 'pause')) {
+      $('conn').textContent = '已暂停';
+      $('conn').className = 'pill warn';
+    }
+    if (j.thresholds && j.thresholds.mode === 'eco') {
+      if ($('conn').textContent === '在线') {
+        $('conn').textContent = '省电';
+        $('conn').className = 'pill ok';
+      }
+    }
+    if (j.user_hold_secs != null && $('holdSecs') && document.activeElement !== $('holdSecs')) {
+      $('holdSecs').value = j.user_hold_secs;
+      $('holdSecsVal').textContent = j.user_hold_secs;
+    }
+    // 家网轻提示（已持久化时）
+    if ($('initCard') && $('initCard').style.display !== 'block') {
+      const hc = j.home_ap_count || 0;
+      if ($('homeTipCard')) {
+        // 仅当引导卡未显示；persisted 由 checkInit/loadConfig 控制，这里用 home 数刷新
+        if (cfgCache && cfgCache.persisted) {
+          $('homeTipCard').style.display = hc === 0 ? 'block' : 'none';
+        }
+      }
     }
     if (!dirty && j.thresholds && cfgCache) {
       const t = j.thresholds;
@@ -490,9 +1011,14 @@ async function tick() {
   }
 }
 
+checkInit();
 loadConfig();
+loadReadiness();
+loadHistory();
 tick();
 setInterval(tick, 2000);
+setInterval(loadHistory, 8000);
+setInterval(loadReadiness, 12000);
 </script>
 </body>
 </html>

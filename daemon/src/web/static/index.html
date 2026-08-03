@@ -196,6 +196,15 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="row"><span class="k">连接</span><span class="v" id="wpa_state" title="">—</span></div>
         <div class="row"><span class="k">守护</span><span class="v" id="sm" title="">—</span></div>
         <p class="err" id="err"></p>
+        <p class="note" id="reasonBar" style="display:none;margin:8px 0 0;color:var(--warn)"></p>
+      </div>
+      <div class="card" id="readyCard" style="display:none">
+        <h2>上手检查</h2>
+        <ul class="tips" id="readySteps" style="margin:0"></ul>
+        <div class="btns" style="margin-top:10px;flex-direction:column">
+          <button type="button" class="primary" style="width:100%" onclick="doInit(false)">保存默认配置</button>
+          <button type="button" style="width:100%" onclick="tab('set');scanAps()">去配置家网</button>
+        </div>
       </div>
       <div class="card" id="initCard" style="display:none">
         <h2>开始配置</h2>
@@ -209,14 +218,23 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <h2>家网未配置</h2>
         <p class="note" style="margin-top:0">已在运行，但未勾选家网 AP。多路由环境下可能切到信号最强但非预期的热点。</p>
         <button type="button" class="primary" style="width:100%" onclick="tab('set');scanAps()">去设置扫描家网</button>
+        <button type="button" style="width:100%;margin-top:8px" onclick="addCurrentHome()">一键加入当前连接</button>
       </div>
       <div class="card">
         <h2>模式</h2>
-        <div class="btns">
-          <button class="primary" onclick="mode('daily')">日用（自动）</button>
-          <button onclick="mode('pause')">暂停守护</button>
+        <div class="btns" id="modeBtns">
+          <button type="button" data-mode="daily" class="primary" onclick="mode('daily')">日用</button>
+          <button type="button" data-mode="eco" onclick="mode('eco')">省电</button>
+          <button type="button" data-mode="pause" onclick="mode('pause')">暂停</button>
         </div>
-        <p class="note detail">暂停=长期只观测；手动换 WiFi 会触发短期「手动保护」（可在设置改秒数）。异名双频须在系统分别保存。</p>
+        <div class="btns" style="margin-top:8px">
+          <button type="button" onclick="softPause(20)">观影 20 分钟</button>
+        </div>
+        <p class="note detail">省电=更长防抖、更稀扫描；观影=临时 hold。异名双频须在系统分别保存。</p>
+      </div>
+      <div class="card">
+        <h2>最近切换</h2>
+        <div id="histList" class="note" style="font-size:12px;font-family:var(--mono)">暂无</div>
       </div>
     </section>
 
@@ -289,6 +307,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <p class="note detail" style="margin-top:0">扫描并勾选属于你的 AP（按 BSSID）。配置后只在家网内双频切换；空=兼容旧启发式。</p>
         <div class="btns">
           <button class="primary" type="button" onclick="scanAps()">扫描附近 AP</button>
+          <button type="button" onclick="addCurrentHome()">当前加入</button>
           <button type="button" onclick="saveHomeAps()">保存家网</button>
           <button type="button" onclick="clearHomeAps()">清空家网</button>
         </div>
@@ -413,6 +432,7 @@ function labelSm(s) {
     ON: '运行中',
     OUT_OF_HOME: '非家网',
     WEAK_OFF: '弱信号已断开',
+    SCREEN_OFF: '息屏降频',
     OFFLINE: '离线'
   };
   if (map[raw]) return map[raw];
@@ -456,9 +476,83 @@ function markDirty() {
 async function mode(m) {
   try {
     await fetch('/api/mode/' + m, { method: 'POST', cache: 'no-store' });
+    highlightMode(m);
     tick();
     loadConfig();
   } catch (e) { $('err').textContent = e.message; }
+}
+
+function highlightMode(m) {
+  document.querySelectorAll('#modeBtns button').forEach(b => {
+    b.classList.toggle('primary', b.dataset.mode === m);
+  });
+}
+
+async function softPause(mins) {
+  try {
+    await fetch('/api/soft-pause?mins=' + (mins || 20), { method: 'POST', cache: 'no-store' });
+    tick();
+  } catch (e) { $('err').textContent = e.message; }
+}
+
+async function addCurrentHome() {
+  try {
+    const r = await fetch('/api/status', { cache: 'no-store' });
+    const j = await r.json();
+    if (!j.bssid) throw new Error('当前无 BSSID');
+    const key = String(j.bssid).toLowerCase();
+    homeSelected[key] = {
+      bssid: j.bssid,
+      ssid: j.ssid || '',
+      band: j.band === '5' ? '5' : (j.band === '2.4' ? '2.4' : 'auto')
+    };
+    await saveHomeAps();
+    updateHomeSummary();
+  } catch (e) {
+    if ($('scanErr')) $('scanErr').textContent = e.message;
+    else $('err').textContent = e.message;
+  }
+}
+
+async function loadHistory() {
+  try {
+    const r = await fetch('/api/history', { cache: 'no-store' });
+    const j = await r.json();
+    const box = $('histList');
+    if (!box) return;
+    const evs = j.events || [];
+    if (!evs.length) { box.textContent = '暂无'; return; }
+    box.innerHTML = evs.slice(0, 10).map(e => {
+      const t = new Date((e.ts_unix || 0) * 1000);
+      const ts = isNaN(t.getTime()) ? '' : t.toLocaleTimeString();
+      return '<div style="padding:4px 0;border-bottom:1px solid var(--line)">' +
+        ts + ' · ' + (e.reason || '') + ' · ' + (e.from_ssid || '?') + '→' + (e.to_ssid || '?') +
+        ' · ' + (e.result || '') + ' · ' + (e.duration_ms || 0) + 'ms</div>';
+    }).join('');
+  } catch (_) { /* ignore */ }
+}
+
+async function loadReadiness() {
+  try {
+    const r = await fetch('/api/readiness', { cache: 'no-store' });
+    const j = await r.json();
+    const card = $('readyCard');
+    const ul = $('readySteps');
+    if (!card || !ul) return;
+    const steps = j.steps || [];
+    const bad = steps.filter(s => !s.ok);
+    // 简洁：只显示未完成；全部 ok 则藏
+    if (!bad.length && j.persisted) {
+      card.style.display = 'none';
+      return;
+    }
+    card.style.display = 'block';
+    const show = document.documentElement.classList.contains('compact') ? bad : steps;
+    ul.innerHTML = (show.length ? show : steps).map(s =>
+      '<li style="color:' + (s.ok ? 'var(--ok)' : 'var(--warn)') + '">' +
+      (s.ok ? '✓ ' : '○ ') + s.title + ' — ' + (s.hint || '') + '</li>'
+    ).join('');
+  } catch (_) { /* ignore */ }
 }
 
 function renderFields(api) {
@@ -843,6 +937,13 @@ async function tick() {
     smEl.textContent = labelSm(j.power_state);
     smEl.title = j.power_state || '';
     $('err').textContent = j.last_error || '';
+    const rb = $('reasonBar');
+    if (rb) {
+      const br = j.block_reason || '';
+      if (br) { rb.style.display = 'block'; rb.textContent = br; }
+      else { rb.style.display = 'none'; rb.textContent = ''; }
+    }
+    if (j.thresholds && j.thresholds.mode) highlightMode(j.thresholds.mode);
     const holdRem = j.hold_remaining_secs || 0;
     const ban = $('holdBanner');
     if (holdRem > 0) {
@@ -860,12 +961,23 @@ async function tick() {
       $('holdText').textContent = '当前不在家网，不自动切换（已选 ' + (j.home_ap_count || 0) + ' 个）';
       $('conn').textContent = '非家网';
       $('conn').className = 'pill warn';
+    } else if (j.power_state === 'SCREEN_OFF') {
+      ban.classList.add('on');
+      $('holdText').textContent = '息屏降频中';
+      $('conn').textContent = '息屏';
+      $('conn').className = 'pill';
     } else {
       ban.classList.remove('on');
     }
     if (j.power_state === 'PAUSE' || (j.thresholds && j.thresholds.mode === 'pause')) {
       $('conn').textContent = '已暂停';
       $('conn').className = 'pill warn';
+    }
+    if (j.thresholds && j.thresholds.mode === 'eco') {
+      if ($('conn').textContent === '在线') {
+        $('conn').textContent = '省电';
+        $('conn').className = 'pill ok';
+      }
     }
     if (j.user_hold_secs != null && $('holdSecs') && document.activeElement !== $('holdSecs')) {
       $('holdSecs').value = j.user_hold_secs;
@@ -901,8 +1013,12 @@ async function tick() {
 
 checkInit();
 loadConfig();
+loadReadiness();
+loadHistory();
 tick();
 setInterval(tick, 2000);
+setInterval(loadHistory, 8000);
+setInterval(loadReadiness, 12000);
 </script>
 </body>
 </html>

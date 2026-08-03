@@ -51,11 +51,10 @@ Phase 1 **不内嵌 Chart.js**，便于压体积。超标先砍功能/依赖，�
 
 ## Web 内嵌
 
-- 源文件：`web/index.html`（开发与打包源）
-- 运行时：daemon `include_bytes!` 嵌入，或构建前复制到 `daemon/src/web/static/index.html`
+- **真源**：`daemon/src/web/static/index.html`（`include_bytes!` 打进 binary）
+- 镜像：`web/index.html` 应与 static **hash 一致**（改面板后 `Copy-Item` 同步）
+- KSU 壳：`webroot/index.html`（跳转 8080，勿与面板合并）
 - MIME：`text/html`；仅服务本机 `127.0.0.1:8080`
-
-若两处都有 HTML，以 **`web/index.html` 为准**，构建脚本应同步到 static。
 
 ## 装入 Magisk 模块
 

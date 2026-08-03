@@ -1,20 +1,78 @@
-use std::io::Read;
-use std::net::SocketAddr;
+use std::collections::VecDeque;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::band_bond::{
-    best_on_band, link_in_home, network_id_for_ssid, parse_scan_results, scan_views,
+    best_on_band, link_in_home, network_id_for_ssid, parse_list_networks, parse_scan_results,
+    scan_views,
 };
 use crate::config::{Config, ConfigPatch};
 use crate::health_score::health_score;
+use crate::power_state::{PowerState, PowerStateManager};
 use crate::state_machine::{StateMachine, SwitchHint};
 use crate::station_info::{iw_station_dump, parse_iw_station, retry_rate, StationSample};
-use crate::web::{StatusSnapshot, ThresholdsView};
+use crate::web::{Readiness, ReadyStep, StatusSnapshot, SwitchEvent, ThresholdsView};
 use crate::wpa_ctrl::WpaCtrl;
+
+const HISTORY_CAP: usize = 10;
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn push_history(hist: &Arc<Mutex<VecDeque<SwitchEvent>>>, ev: SwitchEvent) {
+    if let Ok(mut h) = hist.lock() {
+        h.push_front(ev);
+        while h.len() > HISTORY_CAP {
+            h.pop_back();
+        }
+    }
+}
+
+/// L3：对 connectivitycheck.gstatic.com/generate_204 发 HTTP/1.0，2s 超时
+fn l3_probe(timeout: Duration) -> Result<(), String> {
+    let addr = ("connectivitycheck.gstatic.com", 80)
+        .to_socket_addrs()
+        .map_err(|e| e.to_string())?
+        .next()
+        .ok_or_else(|| "DNS 无结果".to_string())?;
+    let mut stream =
+        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect: {e}"))?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    stream
+        .write_all(
+            b"GET /generate_204 HTTP/1.0\r\nHost: connectivitycheck.gstatic.com\r\nConnection: close\r\n\r\n",
+        )
+        .map_err(|e| format!("write: {e}"))?;
+    let mut buf = [0u8; 128];
+    let n = stream.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+    if n == 0 {
+        return Err("空响应".into());
+    }
+    let head = String::from_utf8_lossy(&buf[..n]);
+    let line = head.lines().next().unwrap_or("");
+    if line.contains(" 204") || line.contains(" 200") || line.contains(" 204 ") {
+        Ok(())
+    } else if line.contains("HTTP/") {
+        // 部分运营商劫持返回 302/200 也算「有网」
+        if line.contains(" 30") || line.contains(" 200") {
+            Ok(())
+        } else {
+            Err(format!("状态行: {line}"))
+        }
+    } else {
+        Err(format!("非 HTTP: {line}"))
+    }
+}
 
 mod band_bond;
 mod config;
@@ -77,9 +135,12 @@ fn main() {
     };
     let wpa = Arc::new(Mutex::new(wpa));
     let snapshot = Arc::new(Mutex::new(StatusSnapshot::new()));
-    // 手动切网保护截止时间；HTTP 可 clear
+    // 手动切网保护截止时间；HTTP 可 clear / soft-pause
     let hold_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let history: Arc<Mutex<VecDeque<SwitchEvent>>> =
+        Arc::new(Mutex::new(VecDeque::with_capacity(HISTORY_CAP)));
     let mut sm = StateMachine::new();
+    let mut power = PowerStateManager::new();
 
     let listen = config.lock().unwrap().listen.clone();
     let addr: SocketAddr = listen.parse().expect("bad listen address");
@@ -90,6 +151,7 @@ fn main() {
     let config_http = Arc::clone(&config);
     let hold_http = Arc::clone(&hold_until);
     let wpa_http = Arc::clone(&wpa);
+    let history_http = Arc::clone(&history);
     thread::spawn(move || {
         for mut req in server.incoming_requests() {
             let url = req.url().to_string();
@@ -102,6 +164,77 @@ fn main() {
                     let s = snapshot_http.lock().unwrap();
                     let json = serde_json::to_string(&*s).unwrap_or_else(|_| "{}".into());
                     json_resp(json, StatusCode(200))
+                }
+                (Method::Get, "/api/history") => {
+                    let h = history_http.lock().unwrap();
+                    let list: Vec<&SwitchEvent> = h.iter().collect();
+                    let body = serde_json::json!({ "ok": true, "events": list });
+                    json_resp(body.to_string(), StatusCode(200))
+                }
+                (Method::Get, "/api/readiness") => {
+                    let c = config_http.lock().unwrap();
+                    let persisted = Config::is_persisted();
+                    let home_n = c.home_aps.len();
+                    let saved = {
+                        let raw = wpa_http
+                            .lock()
+                            .ok()
+                            .and_then(|w| w.list_networks().ok())
+                            .unwrap_or_default();
+                        parse_list_networks(&raw)
+                            .into_iter()
+                            .map(|(_, s)| s)
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                    };
+                    let dual_ok = saved.len() >= 2;
+                    let snap = snapshot_http.lock().unwrap();
+                    let mut steps = vec![
+                        ReadyStep {
+                            id: "persist".into(),
+                            ok: persisted,
+                            title: "保存日用配置".into(),
+                            hint: if persisted {
+                                "config.toml 已存在".into()
+                            } else {
+                                "点「初始化」写入默认配置".into()
+                            },
+                        },
+                        ReadyStep {
+                            id: "system_dual".into(),
+                            ok: dual_ok,
+                            title: "系统已保存双频网络".into(),
+                            hint: if dual_ok {
+                                format!("已保存 {} 个网络", saved.len())
+                            } else {
+                                "请在系统设置分别连接并保存 5G 与 2.4G".into()
+                            },
+                        },
+                        ReadyStep {
+                            id: "home".into(),
+                            ok: home_n > 0,
+                            title: "勾选家网 AP".into(),
+                            hint: if home_n > 0 {
+                                format!("已选 {home_n} 个")
+                            } else {
+                                "多路由建议扫描勾选；空=启发式".into()
+                            },
+                        },
+                    ];
+                    // 简洁：compact 前端可只显示 !ok
+                    let _ = &mut steps;
+                    let body = Readiness {
+                        persisted,
+                        home_configured: home_n > 0,
+                        home_ap_count: home_n,
+                        saved_ssids: saved,
+                        steps,
+                        block_reason: snap.block_reason.clone(),
+                    };
+                    json_resp(
+                        serde_json::to_string(&body).unwrap_or_else(|_| "{}".into()),
+                        StatusCode(200),
+                    )
                 }
                 (Method::Get, "/api/config") => {
                     let c = config_http.lock().unwrap();
@@ -210,6 +343,16 @@ fn main() {
                     }
                     json_resp("{\"ok\":true,\"mode\":\"daily\"}".into(), StatusCode(200))
                 }
+                (Method::Get, "/api/mode/eco") | (Method::Post, "/api/mode/eco") => {
+                    let mut c = config_http.lock().unwrap();
+                    c.mode = "eco".into();
+                    let _ = c.save();
+                    if let Ok(mut s) = snapshot_http.lock() {
+                        s.power_state = "ON".into();
+                        s.thresholds.mode = "eco".into();
+                    }
+                    json_resp("{\"ok\":true,\"mode\":\"eco\"}".into(), StatusCode(200))
+                }
                 (Method::Get, "/api/hold/clear") | (Method::Post, "/api/hold/clear") => {
                     if let Ok(mut h) = hold_http.lock() {
                         *h = None;
@@ -219,6 +362,30 @@ fn main() {
                     }
                     log::info!("user_hold cleared via API");
                     json_resp("{\"ok\":true,\"hold_remaining_secs\":0}".into(), StatusCode(200))
+                }
+                (Method::Get, "/api/soft-pause") | (Method::Post, "/api/soft-pause") => {
+                    // ?mins=20 默认 20
+                    let mins = url
+                        .split('?')
+                        .nth(1)
+                        .and_then(|q| {
+                            q.split('&').find_map(|p| {
+                                let mut kv = p.splitn(2, '=');
+                                match (kv.next(), kv.next()) {
+                                    (Some("mins"), Some(v)) => v.parse::<u64>().ok(),
+                                    _ => None,
+                                }
+                            })
+                        })
+                        .unwrap_or(20)
+                        .clamp(1, 180);
+                    let until = Instant::now() + Duration::from_secs(mins * 60);
+                    *hold_http.lock().unwrap() = Some(until);
+                    log::info!("soft-pause {mins} min via API");
+                    json_resp(
+                        format!("{{\"ok\":true,\"mins\":{mins},\"hold_remaining_secs\":{}}}", mins * 60),
+                        StatusCode(200),
+                    )
                 }
                 (Method::Get, "/api/scan") | (Method::Post, "/api/scan") => {
                     let home = config_http.lock().unwrap().home_aps.clone();
@@ -369,8 +536,16 @@ fn main() {
     // 链路键 ssid|bssid；daemon 自切后短暂忽略变更
     let mut prev_link_key = String::new();
     let mut suppress_link_change_until: Option<Instant> = None;
-
+    // 切后短锁 BSSID，防 band-steering 踢回
+    let mut lock_bssid_until: Option<Instant> = None;
+    let mut screen_on_grace_until: Option<Instant> = None;
+    let mut last_screen = PowerState::On;
     // 启动时同步 mode
+    let mut last_eco = {
+        let c = config.lock().unwrap();
+        sm.apply_eco(c.mode == "eco");
+        c.mode == "eco"
+    };
     {
         let c = config.lock().unwrap();
         if let Ok(mut s) = snapshot.lock() {
@@ -405,6 +580,8 @@ fn main() {
             rssi_disc,
             weak_hold,
             auto_rec,
+            l3_on,
+            eco,
         ) = {
             let c = config.lock().unwrap();
             (
@@ -421,7 +598,36 @@ fn main() {
                 c.rssi_disconnect_dbm,
                 c.weak_hold_secs,
                 c.auto_reconnect,
+                c.l3_probe_enable,
+                c.mode == "eco",
             )
+        };
+
+        if eco != last_eco {
+            sm.apply_eco(eco);
+            last_eco = eco;
+            log::info!("mode debounce: eco={eco}");
+        }
+
+        let screen = power.current_state();
+        if screen == PowerState::On && last_screen == PowerState::Off {
+            screen_on_grace_until = Some(Instant::now() + Duration::from_secs(3));
+        }
+        last_screen = screen;
+        let screen_off = screen == PowerState::Off;
+        let in_grace = screen_on_grace_until
+            .map(|t| Instant::now() < t)
+            .unwrap_or(false);
+        let bssid_locked = lock_bssid_until
+            .map(|t| Instant::now() < t)
+            .unwrap_or(false);
+        // eco / 息屏：SCAN 更稀
+        let scan_gap = if screen_off {
+            60
+        } else if eco {
+            30
+        } else {
+            15
         };
 
         // hold 剩余
@@ -523,18 +729,46 @@ fn main() {
             };
 
             let in_home_now = link_in_home(&home_aps, &bssid_now, &ssid_now);
+            let pen_rem = sm.penalty_remaining_secs();
+
+            // 中文原因条
+            let block_reason = if paused {
+                "已暂停守护".to_string()
+            } else if hold_rem_now > 0 {
+                format!("手动/观影保护中（剩 {hold_rem_now}s）")
+            } else if pen_rem > 0 {
+                format!("切换冷却中（剩 {pen_rem}s）")
+            } else if screen_off {
+                "息屏降频，不主动切网".to_string()
+            } else if in_grace {
+                "亮屏冷静窗，暂不切网".to_string()
+            } else if bssid_locked {
+                "短时锁定当前 AP（防踢回）".to_string()
+            } else if !home_aps.is_empty() && !in_home_now {
+                "当前不在家网".to_string()
+            } else if weak_disconnected {
+                "弱信号已断开".to_string()
+            } else if !Config::is_persisted() {
+                "配置未落盘（可用默认运行）".to_string()
+            } else {
+                String::new()
+            };
 
             {
                 let mut s = snapshot.lock().unwrap();
                 s.state = st.wpa_state.clone();
                 s.rssi = rssi;
                 s.ssid = ssid_now.clone();
+                s.bssid = bssid_now.clone();
                 s.band = band.into();
                 s.score = score;
                 s.hold_remaining_secs = hold_rem_now;
                 s.user_hold_secs = hold_secs;
                 s.home_ap_count = home_aps.len();
                 s.in_home = in_home_now;
+                s.block_reason = block_reason;
+                s.penalty_remaining_secs = pen_rem;
+                s.screen = if screen_off { "OFF" } else { "ON" }.into();
                 s.thresholds = ThresholdsView {
                     score_detect_threshold: detect_th,
                     score_switch_threshold: switch_th,
@@ -548,10 +782,18 @@ fn main() {
                         s.power_state = format!("USER_HOLD({hold_rem_now}s)");
                     } else if !in_home_now && !home_aps.is_empty() {
                         s.power_state = "OUT_OF_HOME".into();
+                    } else if screen_off {
+                        s.power_state = "SCREEN_OFF".into();
                     } else {
                         s.power_state = format!("{:?}", sm.state);
                     }
                 }
+            }
+
+            // 息屏：只更新状态，不 SCAN/不切换
+            if screen_off {
+                thread::sleep(Duration::from_secs(5));
+                continue;
             }
 
             if paused {
@@ -561,6 +803,12 @@ fn main() {
 
             // 手动保护期内：只观测，不切网
             if hold_rem_now > 0 {
+                thread::sleep(Duration::from_secs(1));
+                continue;
+            }
+
+            // 亮屏冷静 / BSSID 短锁：不上切（下切弱信号救援仍允许？ponytail：锁期间全跳过自动切）
+            if in_grace || bssid_locked {
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
@@ -620,7 +868,7 @@ fn main() {
             let hint = sm.on_score(score, switch_th, detect_th, on_preferred);
 
             if hint != SwitchHint::None || weak_rescue {
-                if last_scan.elapsed() > Duration::from_secs(15) || weak_rescue {
+                if last_scan.elapsed() > Duration::from_secs(scan_gap) || weak_rescue {
                     let _ = wpa.lock().unwrap().command("SCAN");
                     thread::sleep(Duration::from_secs(2));
                     last_scan = Instant::now();
@@ -701,6 +949,9 @@ fn main() {
                     } else {
                         "Score"
                     };
+                    let from_band = band.to_string();
+                    let to_band = if peer.freq > 5000 { "5" } else { "2.4" }.to_string();
+                    let switch_t0 = Instant::now();
                     log::info!(
                         "switch {reason}/{:?}: {} {} ssid={} freq={} sig={} score={score:.1}",
                         hint,
@@ -735,6 +986,7 @@ fn main() {
                                 log::warn!("{msg}");
                                 if let Ok(mut snap) = snapshot.lock() {
                                     snap.last_error = msg.clone();
+                                    snap.block_reason = "对侧 SSID 未在系统保存".into();
                                 }
                                 Err(wpa_ctrl::WpaError::Parse(msg))
                             }
@@ -755,13 +1007,52 @@ fn main() {
                                     }
                                 }
                             }
+                            let mut result = if ok { "Ok" } else { "Fail" }.to_string();
+                            if ok && l3_on {
+                                match l3_probe(Duration::from_secs(2)) {
+                                    Ok(()) => {
+                                        if let Ok(mut snap) = snapshot.lock() {
+                                            snap.l3_last = "ok".into();
+                                        }
+                                        log::info!("L3 probe ok");
+                                    }
+                                    Err(e) => {
+                                        log::warn!("L3 probe fail: {e}");
+                                        result = "L3Timeout".into();
+                                        ok = false;
+                                        if let Ok(mut snap) = snapshot.lock() {
+                                            snap.l3_last = format!("fail:{e}");
+                                            snap.last_error =
+                                                format!("切后 L3 失败: {e}");
+                                        }
+                                    }
+                                }
+                            } else if ok {
+                                if let Ok(mut snap) = snapshot.lock() {
+                                    snap.l3_last = "skip".into();
+                                }
+                            }
+                            let dur = switch_t0.elapsed().as_millis() as u64;
+                            push_history(
+                                &history,
+                                SwitchEvent {
+                                    ts_unix: unix_now(),
+                                    from_ssid: ssid.clone(),
+                                    to_ssid: peer.ssid.clone(),
+                                    from_band: from_band.clone(),
+                                    to_band: to_band.clone(),
+                                    reason: reason.into(),
+                                    result: result.clone(),
+                                    duration_ms: dur,
+                                },
+                            );
                             if ok {
                                 sm.finish_switch_ok();
-                                // 救援成功：清弱信号计时
+                                lock_bssid_until =
+                                    Some(Instant::now() + Duration::from_secs(45));
                                 if weak_rescue {
                                     weak_bad_since = None;
                                 }
-                                // 更新链路键，避免紧接着误判手动
                                 if let Ok(w) = wpa.lock() {
                                     if let Ok(s2) = w.status() {
                                         let ns = s2.ssid.clone().unwrap_or_default();
@@ -774,7 +1065,9 @@ fn main() {
                                     }
                                 }
                                 if let Ok(mut snap) = snapshot.lock() {
-                                    snap.last_error.clear();
+                                    if result == "Ok" {
+                                        snap.last_error.clear();
+                                    }
                                 }
                                 log::info!("switch OK -> {}", peer.ssid);
                             } else {
@@ -795,6 +1088,19 @@ fn main() {
                         Err(e) => {
                             log::error!("switch failed: {e}");
                             let msg = e.to_string();
+                            push_history(
+                                &history,
+                                SwitchEvent {
+                                    ts_unix: unix_now(),
+                                    from_ssid: ssid.clone(),
+                                    to_ssid: peer.ssid.clone(),
+                                    from_band: from_band.clone(),
+                                    to_band: to_band.clone(),
+                                    reason: reason.into(),
+                                    result: "Fail".into(),
+                                    duration_ms: switch_t0.elapsed().as_millis() as u64,
+                                },
+                            );
                             sm.enter_penalty(&bond_key);
                             if msg.contains("请先在系统设置") || msg.contains("no network id") {
                                 if let Some(p) = sm.penalty.as_mut() {

@@ -21,6 +21,21 @@ pub struct StatusSnapshot {
     pub home_ap_count: usize,
     /// 当前链路是否在家网内（未配置家网时恒 true）
     pub in_home: bool,
+    /// 中文原因条：为何不切 / 当前阻塞
+    #[serde(default)]
+    pub block_reason: String,
+    /// 惩罚冷却剩余秒
+    #[serde(default)]
+    pub penalty_remaining_secs: u64,
+    /// 屏幕：ON / OFF
+    #[serde(default)]
+    pub screen: String,
+    /// 最近 L3 结果：ok / fail / skip / ""
+    #[serde(default)]
+    pub l3_last: String,
+    /// 当前 BSSID（一键入家网用）
+    #[serde(default)]
+    pub bssid: String,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -29,6 +44,38 @@ pub struct ThresholdsView {
     pub score_switch_threshold: f32,
     pub upswitch_rssi_min_dbm: i32,
     pub mode: String,
+}
+
+/// 切换历史一条
+#[derive(Debug, Clone, Serialize)]
+pub struct SwitchEvent {
+    pub ts_unix: u64,
+    pub from_ssid: String,
+    pub to_ssid: String,
+    pub from_band: String,
+    pub to_band: String,
+    pub reason: String,
+    pub result: String,
+    pub duration_ms: u64,
+}
+
+/// 就绪检查一步
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadyStep {
+    pub id: String,
+    pub ok: bool,
+    pub title: String,
+    pub hint: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Readiness {
+    pub persisted: bool,
+    pub home_configured: bool,
+    pub home_ap_count: usize,
+    pub saved_ssids: Vec<String>,
+    pub steps: Vec<ReadyStep>,
+    pub block_reason: String,
 }
 
 impl StatusSnapshot {
@@ -52,6 +99,11 @@ impl StatusSnapshot {
             user_hold_secs: d.user_hold_secs,
             home_ap_count: 0,
             in_home: true,
+            block_reason: String::new(),
+            penalty_remaining_secs: 0,
+            screen: "ON".into(),
+            l3_last: String::new(),
+            bssid: String::new(),
         }
     }
 }

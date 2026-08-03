@@ -61,6 +61,10 @@ impl Debouncer {
         }
     }
 
+    pub fn set_need_secs(&mut self, secs: u64) {
+        self.need = Duration::from_secs(secs.max(1));
+    }
+
     pub fn reset(&mut self) {
         self.window.clear();
         self.started = None;
@@ -108,6 +112,25 @@ impl StateMachine {
 
     pub fn in_penalty(&self) -> bool {
         self.penalty.as_ref().map(|p| p.active()).unwrap_or(false)
+    }
+
+    pub fn penalty_remaining_secs(&self) -> u64 {
+        self.penalty
+            .as_ref()
+            .filter(|p| p.active())
+            .map(|p| p.until.saturating_duration_since(Instant::now()).as_secs())
+            .unwrap_or(0)
+    }
+
+    /// eco=true → 下切 7s / 上切 12s；否则日用 4s / 7s
+    pub fn apply_eco(&mut self, eco: bool) {
+        if eco {
+            self.down_deb.set_need_secs(7);
+            self.up_deb.set_need_secs(12);
+        } else {
+            self.down_deb.set_need_secs(4);
+            self.up_deb.set_need_secs(7);
+        }
     }
 
     pub fn enter_penalty(&mut self, bond_id: &str) {

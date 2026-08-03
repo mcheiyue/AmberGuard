@@ -66,7 +66,7 @@ pub struct Config {
     /// 家网 AP 列表（BSSID 主键）。非空时自动切换仅在组内进行。
     #[serde(default)]
     pub home_aps: Vec<crate::band_bond::HomeAp>,
-    /// daily=自动切换 / pause=仅观测
+    /// daily=自动切换 / eco=省电拉长防抖 / pause=仅观测
     #[serde(default = "default_mode")]
     pub mode: String,
     /// 日志级别：error / warn / info / debug
@@ -87,6 +87,9 @@ pub struct Config {
     /// 断后是否自动重连。
     #[serde(default = "default_auto_reconnect")]
     pub auto_reconnect: bool,
+    /// 切后 L3 探测（generate_204）。默认开。
+    #[serde(default = "default_l3_probe")]
+    pub l3_probe_enable: bool,
 }
 
 fn default_interface() -> String {
@@ -125,6 +128,9 @@ fn default_weak_hold() -> u64 {
 fn default_auto_reconnect() -> bool {
     true
 }
+fn default_l3_probe() -> bool {
+    true
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -144,6 +150,7 @@ impl Default for Config {
             rssi_disconnect_dbm: default_rssi_disconnect(),
             weak_hold_secs: default_weak_hold(),
             auto_reconnect: default_auto_reconnect(),
+            l3_probe_enable: default_l3_probe(),
         }
     }
 }
@@ -164,6 +171,7 @@ pub struct ConfigPatch {
     pub rssi_disconnect_dbm: Option<i32>,
     pub weak_hold_secs: Option<u64>,
     pub auto_reconnect: Option<bool>,
+    pub l3_probe_enable: Option<bool>,
 }
 
 /// 字段说明（给面板引导用）
@@ -310,9 +318,10 @@ impl Config {
             "下切：5G→2.4G，优先保流畅；上切：2.4G→5G，要等对侧够强且防抖通过。",
             "异名双频（如 XXX_5G 与 XXX）须在系统 WiFi 里分别连接并保存，否则无法 SELECT 切网。",
             "改阈值后立即生效并写入 /data/adb/amberguard/config.toml；可用「恢复默认」一键还原。",
-            "防抖时间固定为日用策略（下切约 4s、上切约 7s），本页不开放，避免误调导致来回跳。",
+            "日用防抖约下切 4s / 上切 7s；省电(eco)更长，少切网少扫描。",
             "手动切网保护：系统里换 WiFi 后会暂停自动切换一段时间；状态页可「立即恢复」。设为 0 即关闭。",
             "家网：在设置里扫描并勾选属于你的 AP（按 BSSID）。配置后只在家网内双频切换，避免公共 WiFi / 错 AP。",
+            "切后会做一次 L3 探测（generate_204）；失败进冷却。可在配置里关 l3_probe_enable。",
         ]
     }
 
@@ -328,9 +337,9 @@ impl Config {
         }
         if let Some(m) = p.mode {
             let m = m.to_lowercase();
-            if m != "daily" && m != "pause" {
+            if m != "daily" && m != "pause" && m != "eco" {
                 return Err(ConfigError::Validate(
-                    "mode 只能是 daily 或 pause".into(),
+                    "mode 只能是 daily / eco / pause".into(),
                 ));
             }
             self.mode = m;
@@ -377,6 +386,9 @@ impl Config {
         }
         if let Some(v) = p.auto_reconnect {
             self.auto_reconnect = v;
+        }
+        if let Some(v) = p.l3_probe_enable {
+            self.l3_probe_enable = v;
         }
         self.validate()
     }
@@ -489,6 +501,7 @@ impl Config {
         self.rssi_disconnect_dbm = cfg.rssi_disconnect_dbm;
         self.weak_hold_secs = cfg.weak_hold_secs;
         self.auto_reconnect = cfg.auto_reconnect;
+        self.l3_probe_enable = cfg.l3_probe_enable;
         Ok(())
     }
 
