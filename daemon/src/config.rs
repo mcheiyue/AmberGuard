@@ -93,6 +93,9 @@ pub struct Config {
     /// 偏好频段：`"5"`（默认上 5G）或 `"2.4"`（偏好 2.4，场景少见）
     #[serde(default = "default_preferred_band")]
     pub preferred_band: String,
+    /// 切成功后短锁当前 AP 秒数（防 band-steering 踢回）。0=关闭。默认 45。
+    #[serde(default = "default_bssid_lock_secs")]
+    pub bssid_lock_secs: u64,
 }
 
 fn default_interface() -> String {
@@ -137,6 +140,9 @@ fn default_l3_probe() -> bool {
 fn default_preferred_band() -> String {
     "5".into()
 }
+fn default_bssid_lock_secs() -> u64 {
+    45
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -158,6 +164,7 @@ impl Default for Config {
             auto_reconnect: default_auto_reconnect(),
             l3_probe_enable: default_l3_probe(),
             preferred_band: default_preferred_band(),
+            bssid_lock_secs: default_bssid_lock_secs(),
         }
     }
 }
@@ -180,6 +187,7 @@ pub struct ConfigPatch {
     pub auto_reconnect: Option<bool>,
     pub l3_probe_enable: Option<bool>,
     pub preferred_band: Option<String>,
+    pub bssid_lock_secs: Option<u64>,
 }
 
 /// 字段说明（给面板引导用）
@@ -331,7 +339,7 @@ impl Config {
             "日用防抖约下切 4s / 上切 7s；省电(eco)更长，少切网少扫描。",
             "手切优先：系统里换网后自动暂停调度（默认60s）；模块只做自动调度，不与你抢。清保护后才会按偏好慢慢拉回。",
             "家网：在设置里扫描并勾选属于你的 AP（按 BSSID）。配置后只在家网内双频切换，避免公共 WiFi / 错 AP。",
-            "切后会做一次 L3 探测（generate_204）；失败进冷却。可在配置里关 l3_probe_enable。",
+            "切后会做一次 L3 探测；失败只标注（门户/超时），不撤销成功、不进冷却。可关 l3_probe_enable。",
         ]
     }
 
@@ -412,6 +420,9 @@ impl Config {
                 }
             };
             self.preferred_band = norm.into();
+        }
+        if let Some(s) = p.bssid_lock_secs {
+            self.bssid_lock_secs = s.min(300);
         }
         self.validate()
     }

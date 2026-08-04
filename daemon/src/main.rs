@@ -263,10 +263,40 @@ fn link_reached_peer(
         .unwrap_or(false)
 }
 
-/// L3：多终点探测。国内 gstatic 常 DNS 失败，不能因此判切网失败。
-/// 成功：任一 HTTP 204/200/30x，或 TCP 能通公共 DNS 端口（有出网能力）。
-fn l3_probe(timeout: Duration) -> Result<(), String> {
-    // (host_or_none_for_ip, port, http_path_or_empty, host_header)
+/// L3 分类结果（刀6）：ok / portal / timeout / unreachable / skip
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum L3Kind {
+    Ok,
+    Portal,
+    Timeout,
+    Unreachable,
+    Skip,
+}
+
+impl L3Kind {
+    fn as_prefix(&self) -> &'static str {
+        match self {
+            L3Kind::Ok => "ok",
+            L3Kind::Portal => "portal",
+            L3Kind::Timeout => "timeout",
+            L3Kind::Unreachable => "net",
+            L3Kind::Skip => "skip",
+        }
+    }
+    fn hist_result(&self) -> &'static str {
+        match self {
+            L3Kind::Ok => "Ok",
+            L3Kind::Portal => "OkL3Portal",
+            L3Kind::Timeout => "OkL3Timeout",
+            L3Kind::Unreachable => "OkL3Net",
+            L3Kind::Skip => "Ok",
+        }
+    }
+}
+
+/// L3：多终点。国内 gstatic 常 DNS 失败 → 不因此判切网失败。
+/// 204=通；HTTP 其它码像门户；全连不上=timeout/net。
+fn l3_probe(timeout: Duration) -> Result<L3Kind, (L3Kind, String)> {
     let http_targets: &[(&str, u16, &str, &str)] = &[
         (
             "connectivitycheck.gstatic.com",
@@ -280,24 +310,38 @@ fn l3_probe(timeout: Duration) -> Result<(), String> {
             "/generate_204",
             "connect.rom.miui.com",
         ),
-        ("www.msftconnecttest.com", 80, "/connecttest.txt", "www.msftconnecttest.com"),
+        (
+            "www.msftconnecttest.com",
+            80,
+            "/connecttest.txt",
+            "www.msftconnecttest.com",
+        ),
     ];
-    let mut last_err = String::from("无终点");
+    let mut last = (L3Kind::Timeout, String::from("无终点"));
+    let mut saw_portal = false;
+    let mut portal_detail = String::new();
     for (host, port, path, hdr) in http_targets {
         match l3_http_one(host, *port, path, hdr, timeout) {
-            Ok(()) => return Ok(()),
-            Err(e) => last_err = e,
+            Ok(L3Kind::Ok) => return Ok(L3Kind::Ok),
+            Ok(L3Kind::Portal) => {
+                saw_portal = true;
+                portal_detail = format!("{host} 非 204");
+            }
+            Ok(k) => last = (k, host.to_string()),
+            Err((k, e)) => last = (k, e),
         }
     }
-    // DNS 全挂时：TCP 探测有出网即可（223.5.5.5 / 1.1.1.1）
+    if saw_portal {
+        return Err((L3Kind::Portal, portal_detail));
+    }
     for ip in &["223.5.5.5:53", "1.1.1.1:80", "8.8.8.8:53"] {
         if let Ok(addr) = ip.parse() {
             if TcpStream::connect_timeout(&addr, timeout).is_ok() {
-                return Ok(());
+                return Ok(L3Kind::Ok);
             }
         }
     }
-    Err(last_err)
+    Err(last)
 }
 
 fn l3_http_one(
@@ -306,35 +350,96 @@ fn l3_http_one(
     path: &str,
     host_hdr: &str,
     timeout: Duration,
-) -> Result<(), String> {
+) -> Result<L3Kind, (L3Kind, String)> {
     let addr = (host, port)
         .to_socket_addrs()
-        .map_err(|e| format!("DNS {host}: {e}"))?
+        .map_err(|e| (L3Kind::Unreachable, format!("DNS {host}: {e}")))?
         .next()
-        .ok_or_else(|| format!("DNS {host}: 无结果"))?;
-    let mut stream =
-        TcpStream::connect_timeout(&addr, timeout).map_err(|e| format!("connect {host}: {e}"))?;
+        .ok_or_else(|| (L3Kind::Unreachable, format!("DNS {host}: 无结果")))?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| {
+        let msg = e.to_string();
+        let kind = if msg.contains("timed") || msg.contains("10060") || msg.contains("110") {
+            L3Kind::Timeout
+        } else {
+            L3Kind::Unreachable
+        };
+        (kind, format!("connect {host}: {e}"))
+    })?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
-    let req = format!(
-        "GET {path} HTTP/1.0\r\nHost: {host_hdr}\r\nConnection: close\r\n\r\n"
-    );
+    let req = format!("GET {path} HTTP/1.0\r\nHost: {host_hdr}\r\nConnection: close\r\n\r\n");
     stream
         .write_all(req.as_bytes())
-        .map_err(|e| format!("write: {e}"))?;
+        .map_err(|e| (L3Kind::Timeout, format!("write: {e}")))?;
     let mut buf = [0u8; 128];
-    let n = stream.read(&mut buf).map_err(|e| format!("read: {e}"))?;
+    let n = stream
+        .read(&mut buf)
+        .map_err(|e| (L3Kind::Timeout, format!("read: {e}")))?;
     if n == 0 {
-        return Err("空响应".into());
+        return Err((L3Kind::Timeout, "空响应".into()));
     }
     let head = String::from_utf8_lossy(&buf[..n]);
     let line = head.lines().next().unwrap_or("");
-    if line.contains(" 204") || line.contains(" 200") || line.contains(" 30") {
-        Ok(())
+    // generate_204：仅 204 算干净；200/30x 多像门户劫持
+    if line.contains(" 204") {
+        Ok(L3Kind::Ok)
+    } else if path.contains("connecttest") && line.contains(" 200") {
+        Ok(L3Kind::Ok)
+    } else if line.contains(" 200") || line.contains(" 30") || line.contains(" 302") || line.contains(" 301") {
+        Ok(L3Kind::Portal)
     } else if line.contains("HTTP/") {
-        Err(format!("状态行: {line}"))
+        Err((L3Kind::Portal, format!("状态行: {line}")))
     } else {
-        Err(format!("非 HTTP: {line}"))
+        Err((L3Kind::Timeout, format!("非 HTTP: {line}")))
+    }
+}
+
+/// 状态页一句人话（刀4）
+fn status_summary_zh(
+    band: &str,
+    score: f32,
+    mode: &str,
+    hold_rem: u64,
+    pen_rem: u64,
+    in_home: bool,
+    home_n: usize,
+    screen_off: bool,
+    paused: bool,
+    on_preferred: bool,
+    lock_rem: u64,
+    prefer_5: bool,
+) -> String {
+    if paused {
+        return "已暂停 · 仅观测".into();
+    }
+    if hold_rem > 0 {
+        return format!("手切/观影保护中 · {hold_rem}s");
+    }
+    if screen_off {
+        return "息屏降频 · 不主动切".into();
+    }
+    if pen_rem > 0 {
+        return format!("切换冷却中 · {pen_rem}s");
+    }
+    if lock_rem > 0 {
+        return format!("短时锁 AP · {lock_rem}s（防踢回）");
+    }
+    if home_n > 0 && !in_home {
+        return "非家网 · 仅观测".into();
+    }
+    let band_zh = if band == "5" { "5G" } else if band == "2.4" { "2.4G" } else { "未知频段" };
+    let pref = if prefer_5 { "5G" } else { "2.4G" };
+    let mode_s = if mode == "eco" { "省电" } else { "日用" };
+    if on_preferred {
+        if score >= 70.0 {
+            format!("{band_zh} 良好 · {mode_s}守护中")
+        } else if score >= 30.0 {
+            format!("{band_zh} 观察中 · 分 {score:.0}")
+        } else {
+            format!("{band_zh} 偏弱 · 可能下切")
+        }
+    } else {
+        format!("{band_zh} 后备 · 等{pref}回暖")
     }
 }
 
@@ -883,6 +988,7 @@ fn main() {
             l3_on,
             eco,
             preferred_is_5g,
+            bssid_lock_secs,
         ) = {
             let c = config.lock().unwrap();
             (
@@ -902,6 +1008,7 @@ fn main() {
                 c.l3_probe_enable,
                 c.mode == "eco",
                 c.preferred_band == "5" || c.preferred_band.is_empty(),
+                c.bssid_lock_secs,
             )
         };
 
@@ -920,9 +1027,16 @@ fn main() {
         let in_grace = screen_on_grace_until
             .map(|t| Instant::now() < t)
             .unwrap_or(false);
-        let bssid_locked = lock_bssid_until
-            .map(|t| Instant::now() < t)
-            .unwrap_or(false);
+        let lock_rem_secs = lock_bssid_until
+            .map(|t| {
+                if Instant::now() < t {
+                    t.saturating_duration_since(Instant::now()).as_secs()
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
+        let bssid_locked = lock_rem_secs > 0;
         // 扫描间隔：息屏最稀；观察带（分<观察线）更勤 —— 用户调「观察线」应能感到扫/反应变化
         let prev_score = snapshot
             .lock()
@@ -1089,7 +1203,7 @@ fn main() {
             } else if in_grace {
                 "亮屏冷静窗，暂不切网".to_string()
             } else if bssid_locked {
-                "短时锁定当前 AP（防踢回）".to_string()
+                format!("短时锁定当前 AP（防踢回，剩 {lock_rem_secs}s）")
             } else if fail_backoff_until
                 .map(|t| Instant::now() < t)
                 .unwrap_or(false)
@@ -1125,6 +1239,21 @@ fn main() {
                 s.threshold_hint = th_hint.clone();
                 s.best_5g_rssi = cached_best_5g;
                 s.penalty_remaining_secs = pen_rem;
+                s.bssid_lock_remaining_secs = lock_rem_secs;
+                s.summary = status_summary_zh(
+                    band,
+                    score,
+                    &mode,
+                    hold_rem_now,
+                    pen_rem,
+                    in_home_now,
+                    home_aps.len(),
+                    screen_off,
+                    paused,
+                    on_preferred,
+                    lock_rem_secs,
+                    preferred_is_5g,
+                );
                 s.screen = if screen_off { "OFF" } else { "ON" }.into();
                 s.thresholds = ThresholdsView {
                     score_detect_threshold: detect_th,
@@ -1193,11 +1322,12 @@ fn main() {
                 fail_backoff_until = None;
             }
 
-            // 亮屏冷静 / BSSID 短锁：不上切（下切弱信号救援仍允许？ponytail：锁期间全跳过自动切）
-            if in_grace || bssid_locked {
+            // 亮屏冷静窗：全跳过
+            if in_grace {
                 thread::sleep(Duration::from_secs(1));
                 continue;
             }
+            // BSSID 短锁：跳过健康分调度；弱信号救援仍可（刀7）
 
             // 断后自动重连
             if weak_disconnected && auto_rec {
@@ -1252,6 +1382,12 @@ fn main() {
             }
 
             let hint = sm.on_score(score, switch_th, detect_th, on_preferred);
+            // 短锁期间：忽略 Score 上/下切，仅弱救援可进
+            let hint = if bssid_locked {
+                SwitchHint::None
+            } else {
+                hint
+            };
 
             if hint != SwitchHint::None || weak_rescue {
                 if last_scan.elapsed() > Duration::from_secs(scan_gap) || weak_rescue {
@@ -1533,25 +1669,27 @@ fn main() {
                             // （国内 gstatic DNS 失败曾导致「已切上却 L3Timeout+冷却」）
                             if ok && l3_on {
                                 match l3_probe(Duration::from_secs(2)) {
-                                    Ok(()) => {
+                                    Ok(k) => {
+                                        result = k.hist_result().into();
                                         if let Ok(mut snap) = snapshot.lock() {
-                                            snap.l3_last = "ok".into();
+                                            snap.l3_last = k.as_prefix().into();
                                         }
-                                        result = "Ok".into();
-                                        log::info!("L3 probe ok");
+                                        log::info!("L3 probe {}", k.as_prefix());
                                     }
-                                    Err(e) => {
-                                        log::warn!("L3 probe soft-fail (仍计切换成功): {e}");
-                                        result = "OkL3Warn".into();
+                                    Err((k, e)) => {
+                                        log::warn!(
+                                            "L3 probe soft-fail {} (仍计切换成功): {e}",
+                                            k.as_prefix()
+                                        );
+                                        result = k.hist_result().into();
                                         if let Ok(mut snap) = snapshot.lock() {
-                                            snap.l3_last = format!("warn:{e}");
-                                            // 不写 last_error 抢主状态；仅 l3_last
+                                            snap.l3_last = format!("{}:{e}", k.as_prefix());
                                         }
                                     }
                                 }
                             } else if ok {
                                 if let Ok(mut snap) = snapshot.lock() {
-                                    snap.l3_last = "skip".into();
+                                    snap.l3_last = L3Kind::Skip.as_prefix().into();
                                 }
                             }
                             let dur = switch_t0.elapsed().as_millis() as u64;
@@ -1589,8 +1727,11 @@ fn main() {
                                 fail_streak = 0;
                                 fail_streak_key.clear();
                                 fail_backoff_until = None;
-                                lock_bssid_until =
-                                    Some(Instant::now() + Duration::from_secs(45));
+                                if bssid_lock_secs > 0 {
+                                    lock_bssid_until = Some(
+                                        Instant::now() + Duration::from_secs(bssid_lock_secs),
+                                    );
+                                }
                                 if weak_rescue {
                                     weak_bad_since = None;
                                 }

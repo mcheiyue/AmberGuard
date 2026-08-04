@@ -42,6 +42,12 @@ pub struct StatusSnapshot {
     /// 最近一次扫描到的家网 5G 最强 RSSI（无则 null）
     #[serde(default)]
     pub best_5g_rssi: Option<i32>,
+    /// 状态页一句人话
+    #[serde(default)]
+    pub summary: String,
+    /// 切后 BSSID 短锁剩余秒（0=未锁）
+    #[serde(default)]
+    pub bssid_lock_remaining_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -112,6 +118,8 @@ impl StatusSnapshot {
             bssid: String::new(),
             threshold_hint: String::new(),
             best_5g_rssi: None,
+            summary: String::new(),
+            bssid_lock_remaining_secs: 0,
         }
     }
 }

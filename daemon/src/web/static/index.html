@@ -171,7 +171,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       <div class="logo" aria-hidden="true"></div>
       <div>
         <h1>AmberGuard</h1>
-        <small>双频守护 · Phase 4</small>
+        <small id="summaryTop">双频守护</small>
       </div>
     </div>
     <span id="conn" class="pill">连接中…</span>
@@ -191,6 +191,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
     <section class="page on" id="p-status">
       <div class="card">
         <h2>链路</h2>
+        <p id="summaryLine" style="margin:0 0 10px;font-size:16px;font-weight:650;letter-spacing:.02em;color:var(--fg)">—</p>
         <div class="hero">
           <div class="metric">
             <div class="lab">健康度</div>
@@ -262,6 +263,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
           与设置里「优先 5G / 2.4G」联动。健康分≈半信号+半重传。
         </p>
         <p class="note detail" style="margin-top:0">先选预设再微调。改完点保存即写入 config.toml。</p>
+        <p class="note" id="thLive" style="margin:8px 0;color:var(--amber);min-height:1.2em">拖动滑条可预览影响（未保存）</p>
         <div class="btns" id="presets"></div>
         <div id="fields"></div>
         <div class="btns">
@@ -331,7 +333,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       </div>
       <div class="card">
         <h2>关于</h2>
-        <div class="row"><span class="k">版本</span><span class="v" id="aboutVer">v0.5.8</span></div>
+        <div class="row"><span class="k">版本</span><span class="v" id="aboutVer">v0.5.9</span></div>
         <div class="row"><span class="k">面板</span><span class="v">127.0.0.1:8080</span></div>
         <div class="row"><span class="k">日志</span><span class="v" style="font-size:11px">/data/adb/amberguard/log/amberguard.log</span></div>
         <p class="note" style="margin-top:10px">
@@ -372,6 +374,20 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         </div>
         <div class="btns">
           <button class="primary" type="button" onclick="saveHoldSecs()">保存保护时长</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>切后短锁 AP</h2>
+        <p class="note detail" style="margin-top:0">切换成功后短时钉在当前 AP，减轻路由 band-steering 踢回。锁定期不做健康分调度；弱信号救援仍可。0=关闭。</p>
+        <div class="field" style="border:0;padding-bottom:0;margin-bottom:0">
+          <label>锁定时长 <span class="def">默认 45 秒</span></label>
+          <div class="ctrl">
+            <input type="range" id="lockSecs" min="0" max="180" step="5" value="45" oninput="$('lockSecsVal').textContent=this.value">
+            <span class="val" id="lockSecsVal">45</span>
+          </div>
+        </div>
+        <div class="btns">
+          <button class="primary" type="button" onclick="saveLockSecs()">保存短锁</button>
         </div>
       </div>
       <div class="card">
@@ -608,17 +624,34 @@ function histReasonZh(r) {
   };
   return m[r] || r || '—';
 }
-function histResultZh(r) {
+  function histResultZh(r) {
   const m = {
-    Ok: '成功', OkL3Warn: '成功（连通性告警）', Fail: '未落到目标',
-    L3Timeout: 'L3 超时', Penalty: '冷却'
+    Ok: '成功',
+    OkL3Warn: '成功（连通性告警）',
+    OkL3Portal: '成功（可能要网页认证）',
+    OkL3Timeout: '成功（探测超时）',
+    OkL3Net: '成功（探测不可达）',
+    Fail: '未落到目标',
+    L3Timeout: 'L3 超时',
+    Penalty: '冷却'
   };
   return m[r] || r || '—';
 }
 function histResultClass(r) {
-  if (r === 'Ok' || r === 'OkL3Warn') return 'ok';
+  if (r === 'Ok') return 'ok';
+  if (r === 'OkL3Warn' || r === 'OkL3Portal' || r === 'OkL3Timeout' || r === 'OkL3Net') return 'muted';
   if (r === 'Fail' || r === 'L3Timeout') return 'bad';
   return 'muted';
+}
+function l3LastZh(s) {
+  if (!s) return '';
+  if (s === 'ok') return '连通正常';
+  if (s === 'skip') return '已关闭 L3';
+  if (s.startsWith('portal')) return '可能要网页认证（' + s.slice(7) + '）';
+  if (s.startsWith('timeout')) return '探测超时（' + s.slice(8) + '）';
+  if (s.startsWith('net')) return '网络不可达（' + s.slice(4) + '）';
+  if (s.startsWith('warn:')) return '连通告警（' + s.slice(5) + '）';
+  return s;
 }
 
 async function clearHistory() {
@@ -730,8 +763,9 @@ function renderFields(api) {
     box.appendChild(div);
     const inp = $('f_' + f.key);
     const val = $('v_' + f.key);
-    inp.addEventListener('input', () => { val.textContent = inp.value; markDirty(); });
+    inp.addEventListener('input', () => { val.textContent = inp.value; markDirty(); updateThLive(); });
   }
+  updateThLive();
   const pb = $('presets');
   pb.innerHTML = '';
   for (const p of api.presets) {
@@ -874,6 +908,10 @@ function syncSettingsForm() {
   if (c.user_hold_secs != null && $('holdSecs')) {
     $('holdSecs').value = c.user_hold_secs;
     $('holdSecsVal').textContent = c.user_hold_secs;
+  }
+  if (c.bssid_lock_secs != null && $('lockSecs')) {
+    $('lockSecs').value = c.bssid_lock_secs;
+    if ($('lockSecsVal')) $('lockSecsVal').textContent = c.bssid_lock_secs;
   }
   if (c.weak_action && $('weakAction')) $('weakAction').value = c.weak_action;
   if (c.rssi_disconnect_dbm != null && $('weakRssi')) {
@@ -1088,6 +1126,42 @@ async function clearHold() {
   }
 }
 
+function updateThLive() {
+  const el = $('thLive');
+  if (!el) return;
+  const sw = parseFloat(($('f_score_switch_threshold') || {}).value);
+  const det = parseFloat(($('f_score_detect_threshold') || {}).value);
+  const up = parseFloat(($('f_upswitch_rssi_min_dbm') || {}).value);
+  if (isNaN(sw) && isNaN(det) && isNaN(up)) {
+    el.textContent = '拖动滑条可预览影响（未保存）';
+    return;
+  }
+  const bits = [];
+  if (!isNaN(sw)) bits.push(sw >= 40 ? '下切线偏高 → 更早离开偏好' : (sw <= 25 ? '下切线偏低 → 更稳少切' : '下切线适中'));
+  if (!isNaN(det)) bits.push(det >= 75 ? '观察线偏高 → 更早加扫' : (det <= 60 ? '观察线偏低 → 更晚进入观察' : '观察线适中'));
+  if (!isNaN(up)) bits.push(up >= -60 ? '上切要求偏好侧更强' : (up <= -70 ? '上切更容易回偏好' : '上切 RSSI 适中'));
+  el.textContent = bits.join(' · ') + '（预览，点保存生效）';
+}
+
+async function saveLockSecs() {
+  try {
+    const v = parseInt(($('lockSecs') || {}).value, 10);
+    const secs = isNaN(v) ? 45 : Math.max(0, Math.min(300, v));
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bssid_lock_secs: secs }),
+      cache: 'no-store'
+    });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    if (j.config) cfgCache = j;
+    if ($('setMsg')) $('setMsg').textContent = secs === 0 ? '已关闭切后短锁' : ('短锁 ' + secs + ' 秒');
+  } catch (e) {
+    if ($('setErr')) $('setErr').textContent = e.message;
+  }
+}
+
 async function loadLogs() {
   try {
     const r = await fetch('/api/logs?lines=300', { cache: 'no-store' });
@@ -1118,6 +1192,9 @@ async function tick() {
     const j = await r.json();
     $('conn').textContent = '在线';
     $('conn').className = 'pill ok';
+    const sum = j.summary || '';
+    if ($('summaryLine')) $('summaryLine').textContent = sum || '—';
+    if ($('summaryTop') && sum) $('summaryTop').textContent = sum;
     $('ssid').textContent = j.ssid || '—';
     const band = j.band === '5' ? '5 GHz' : (j.band === '2.4' ? '2.4 GHz' : (j.band || '—'));
     const chip = $('bandchip');
@@ -1163,7 +1240,9 @@ async function tick() {
     }
     const thh = $('thHint');
     if (thh) {
-      thh.textContent = j.threshold_hint || '';
+      const l3z = l3LastZh(j.l3_last || '');
+      const base = j.threshold_hint || '';
+      thh.textContent = base + (l3z ? ((base ? ' · ' : '') + 'L3：' + l3z) : '');
     }
     const holdRem = j.hold_remaining_secs || 0;
     const ban = $('holdBanner');
