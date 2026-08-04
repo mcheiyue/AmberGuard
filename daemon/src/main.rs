@@ -1431,22 +1431,17 @@ fn main() {
                     // 下切=离开偏好 → 非偏好频段；上切=回到偏好
                     // 下切=离开偏好 → 非偏好频段；上切=回到偏好
                     SwitchHint::Downswitch => {
-                        // 刀4同频优选：偏好频段且有更好同频 AP → 优先同频（日常漫游）
-                        let same_band_better = best_on_band(
+                        // 同频优选：偏好频段内有更好同频 AP（≥+8 dB）→ 先换；否则下切非偏好
+                        best_on_band(
                             &scans,
                             &ssid,
                             preferred_is_5g,
-                            -80,
+                            rssi + 8,
                             &bonds,
                             &home_aps,
-                        ).filter(|a| {
-                            let d = a.signal - rssi;
-                            d >= 8 && !a.bssid.eq_ignore_ascii_case(&cur_bssid)
-                        });
-
-                        if let Some(peer) = same_band_better {
-                            peer
-                        } else {
+                        )
+                        .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid))
+                        .or_else(|| {
                             best_on_band(
                                 &scans,
                                 &ssid,
@@ -1455,7 +1450,7 @@ fn main() {
                                 &bonds,
                                 &home_aps,
                             )
-                        }
+                        })
                     }
                     SwitchHint::Upswitch => {
                         best_on_band(
