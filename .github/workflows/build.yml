@@ -6,7 +6,7 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
-      - 'web/**'
+      # 勿 ignore web/**：开发源与 static 可能分叉，改面板应触发 CI
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -34,6 +34,33 @@ jobs:
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
+
+      # 面板真源 = daemon/src/web/static/index.html（include_bytes!）
+      # web/index.html 必须与之字节一致，防止分叉
+      - name: Check WebUI single source
+        run: |
+          set -e
+          STATIC="daemon/src/web/static/index.html"
+          WEB="web/index.html"
+          test -f "$STATIC"
+          if [ -f "$WEB" ]; then
+            h1=$(sha256sum "$STATIC" | awk '{print $1}')
+            h2=$(sha256sum "$WEB" | awk '{print $1}')
+            echo "static=$h1"
+            echo "web=$h2"
+            if [ "$h1" != "$h2" ]; then
+              echo "ERROR: web/index.html 与 static 不一致。请 cp daemon/src/web/static/index.html web/index.html"
+              exit 1
+            fi
+          else
+            echo "WARN: web/index.html 缺失（仅 static 内嵌，可接受）"
+          fi
+
+      - name: Host cargo check + test
+        working-directory: daemon
+        run: |
+          cargo check
+          cargo test -- --nocapture
 
       - name: Build daemon
         working-directory: daemon

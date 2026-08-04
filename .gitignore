@@ -18,15 +18,10 @@ jniLibs/
 .DS_Store
 Thumbs.db
 
-# Packed module（允许本机保留 dist 下正式包名，忽略调试产物）
+# 本地打包 / 调试产物（勿提交 binary、probe、旧模块树）
 *.zip
-dist/probe*
-dist/deploy_*
-dist/ci_*
-dist/_*/
-dist/module_staging/
-dist/**/*.sh
-!dist/AmberGuard-v*.zip
+dist/
+!dist/.gitkeep
 
 # 本地 adb/调试杂物
 *.log
