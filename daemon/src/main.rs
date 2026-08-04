@@ -1429,15 +1429,33 @@ fn main() {
 
                 let target = match hint {
                     // 下切=离开偏好 → 非偏好频段；上切=回到偏好
+                    // 下切=离开偏好 → 非偏好频段；上切=回到偏好
                     SwitchHint::Downswitch => {
-                        best_on_band(
+                        // 刀4同频优选：偏好频段且有更好同频 AP → 优先同频（日常漫游）
+                        let same_band_better = best_on_band(
                             &scans,
                             &ssid,
-                            !preferred_is_5g,
+                            preferred_is_5g,
                             -80,
                             &bonds,
                             &home_aps,
-                        )
+                        ).filter(|a| {
+                            let d = a.signal - rssi;
+                            d >= 8 && !a.bssid.eq_ignore_ascii_case(&cur_bssid)
+                        });
+
+                        if let Some(peer) = same_band_better {
+                            peer
+                        } else {
+                            best_on_band(
+                                &scans,
+                                &ssid,
+                                !preferred_is_5g,
+                                -80,
+                                &bonds,
+                                &home_aps,
+                            )
+                        }
                     }
                     SwitchHint::Upswitch => {
                         best_on_band(
