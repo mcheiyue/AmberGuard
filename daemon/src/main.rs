@@ -1290,9 +1290,9 @@ fn main() {
                 update_module_description(&line);
             }
 
-            // 息屏：只更新状态，不 SCAN/不切换
+            // 息屏：只更新状态，不 SCAN/不切换；睡 1s（勿 5s，否则亮屏后长时间「卡在息屏」）
             if screen_off {
-                thread::sleep(Duration::from_secs(5));
+                thread::sleep(Duration::from_secs(1));
                 continue;
             }
 
