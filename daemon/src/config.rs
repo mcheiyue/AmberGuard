@@ -96,6 +96,15 @@ pub struct Config {
     /// 切成功后短锁当前 AP 秒数（防 band-steering 踢回）。0=关闭。默认 45。
     #[serde(default = "default_bssid_lock_secs")]
     pub bssid_lock_secs: u64,
+    /// 偏好频段内追优漫游（同频更好 AP）。默认开。
+    #[serde(default = "default_roam_enable")]
+    pub roam_enable: bool,
+    /// 对端须比当前强多少 dB 才追优。默认 12。
+    #[serde(default = "default_roam_margin")]
+    pub roam_margin_db: i32,
+    /// 更好 AP 需持续可见秒数。默认 6。
+    #[serde(default = "default_roam_hold")]
+    pub roam_hold_secs: u64,
 }
 
 fn default_interface() -> String {
@@ -143,6 +152,15 @@ fn default_preferred_band() -> String {
 fn default_bssid_lock_secs() -> u64 {
     45
 }
+fn default_roam_enable() -> bool {
+    true
+}
+fn default_roam_margin() -> i32 {
+    12
+}
+fn default_roam_hold() -> u64 {
+    6
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -165,6 +183,9 @@ impl Default for Config {
             l3_probe_enable: default_l3_probe(),
             preferred_band: default_preferred_band(),
             bssid_lock_secs: default_bssid_lock_secs(),
+            roam_enable: default_roam_enable(),
+            roam_margin_db: default_roam_margin(),
+            roam_hold_secs: default_roam_hold(),
         }
     }
 }
@@ -188,6 +209,9 @@ pub struct ConfigPatch {
     pub l3_probe_enable: Option<bool>,
     pub preferred_band: Option<String>,
     pub bssid_lock_secs: Option<u64>,
+    pub roam_enable: Option<bool>,
+    pub roam_margin_db: Option<i32>,
+    pub roam_hold_secs: Option<u64>,
 }
 
 /// 字段说明（给面板引导用）
@@ -340,6 +364,7 @@ impl Config {
             "手切优先：系统里换网后自动暂停调度（默认60s）；模块只做自动调度，不与你抢。清保护后才会按偏好慢慢拉回。",
             "家网：在设置里扫描并勾选属于你的 AP（按 BSSID）。配置后只在家网内双频切换，避免公共 WiFi / 错 AP。",
             "切后会做一次 L3 探测；失败只标注（门户/超时），不撤销成功、不进冷却。可关 l3_probe_enable。",
+            "同频追优：偏好频段上且分<观察线时，家网内另一 AP 比当前强≥12dB 并持续约6s → 只换同频（默认开，roam_enable）。",
         ]
     }
 
@@ -423,6 +448,15 @@ impl Config {
         }
         if let Some(s) = p.bssid_lock_secs {
             self.bssid_lock_secs = s.min(300);
+        }
+        if let Some(v) = p.roam_enable {
+            self.roam_enable = v;
+        }
+        if let Some(m) = p.roam_margin_db {
+            self.roam_margin_db = m.clamp(5, 25);
+        }
+        if let Some(h) = p.roam_hold_secs {
+            self.roam_hold_secs = h.clamp(2, 30);
         }
         self.validate()
     }

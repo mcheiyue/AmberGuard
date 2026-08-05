@@ -239,4 +239,6 @@ pub enum SwitchHint {
     None,
     Downswitch,
     Upswitch,
+    /// 偏好频段内追优（仅同频更好 AP，由主循环判定）
+    SameBandRoam,
 }

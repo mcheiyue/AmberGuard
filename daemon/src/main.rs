@@ -955,6 +955,8 @@ fn main() {
     let mut suppress_link_change_until: Option<Instant> = None;
     // 切后短锁 BSSID，防 band-steering 踢回
     let mut lock_bssid_until: Option<Instant> = None;
+    // 追优：更好同频 AP 持续可见 (bssid_lower, since)
+    let mut roam_pending: Option<(String, Instant)> = None;
     let mut screen_on_grace_until: Option<Instant> = None;
     let mut last_screen = PowerState::On;
     // 启动时同步 mode
@@ -1007,6 +1009,9 @@ fn main() {
             eco,
             preferred_is_5g,
             bssid_lock_secs,
+            roam_enable,
+            roam_margin_db,
+            roam_hold_secs,
         ) = {
             let c = config.lock().unwrap();
             (
@@ -1027,6 +1032,9 @@ fn main() {
                 c.mode == "eco",
                 c.preferred_band == "5" || c.preferred_band.is_empty(),
                 c.bssid_lock_secs,
+                c.roam_enable,
+                c.roam_margin_db,
+                c.roam_hold_secs,
             )
         };
 
@@ -1400,14 +1408,26 @@ fn main() {
             }
 
             let hint = sm.on_score(score, switch_th, detect_th, on_preferred);
-            // 短锁期间：忽略 Score 上/下切，仅弱救援可进
+            // 短锁期间：忽略 Score 上/下切与追优，仅弱救援可进
             let hint = if bssid_locked {
                 SwitchHint::None
             } else {
                 hint
             };
+            let hold_now = hold_rem_now; // 上方已算
+            // 追优探针：偏好频段 + 分<观察线 + 已配家网（默认=5G 内追更好 AP）
+            let want_roam_probe = roam_enable
+                && on_preferred
+                && score < detect_th
+                && !home_aps.is_empty()
+                && hold_now == 0
+                && !screen_off
+                && !bssid_locked
+                && !paused
+                && hint == SwitchHint::None
+                && !weak_rescue;
 
-            if hint != SwitchHint::None || weak_rescue {
+            if hint != SwitchHint::None || weak_rescue || want_roam_probe {
                 if last_scan.elapsed() > Duration::from_secs(scan_gap) || weak_rescue {
                     let _ = wpa.lock().unwrap().command("SCAN");
                     let _ = std::process::Command::new("cmd")
@@ -1445,11 +1465,12 @@ fn main() {
                 let cur_bssid = bssid_now;
                 let cur_is_5g = band == "5";
 
-                let target = match hint {
-                    // 下切=离开偏好 → 非偏好频段；上切=回到偏好
+                let mut roam_fire = false;
+                let mut target = match hint {
                     // 下切=离开偏好 → 非偏好频段；上切=回到偏好
                     SwitchHint::Downswitch => {
-                        // 同频优选：偏好频段内有更好同频 AP（≥+8 dB）→ 先换；否则下切非偏好
+                        roam_pending = None;
+                        // 同频优选（逃生）：≥+8 dB 先换同频；否则下切非偏好
                         best_on_band(
                             &scans,
                             &ssid,
@@ -1471,6 +1492,7 @@ fn main() {
                         })
                     }
                     SwitchHint::Upswitch => {
+                        roam_pending = None;
                         best_on_band(
                             &scans,
                             &ssid,
@@ -1480,7 +1502,9 @@ fn main() {
                             &home_aps,
                         )
                     }
+                    SwitchHint::SameBandRoam => None, // 由下方主循环填充
                     SwitchHint::None if weak_rescue => {
+                        roam_pending = None;
                         // 救援：① 同频更强(+5dB) ② 否则 2.4 且明显高于断开阈值
                         let better_same = best_on_band(
                             &scans,
@@ -1510,6 +1534,52 @@ fn main() {
                     SwitchHint::None => None,
                 };
 
+                // 追优：仅同频更好家网 AP（不下 2.4）；dB 主判，分<观察线作门
+                if target.is_none() && want_roam_probe {
+                    let better = best_on_band(
+                        &scans,
+                        &ssid,
+                        preferred_is_5g,
+                        rssi + roam_margin_db,
+                        &bonds,
+                        &home_aps,
+                    )
+                    .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid));
+                    if let Some(peer) = better {
+                        let key = peer.bssid.to_lowercase();
+                        match &roam_pending {
+                            Some((kb, since))
+                                if *kb == key
+                                    && since.elapsed() >= Duration::from_secs(roam_hold_secs)
+                            => {
+                                log::info!(
+                                    "roam fire: {} {} dBm (cur {rssi}, margin +{roam_margin_db}, hold {roam_hold_secs}s)",
+                                    peer.bssid,
+                                    peer.signal
+                                );
+                                target = Some(peer);
+                                roam_fire = true;
+                                roam_pending = None;
+                            }
+                            Some((kb, _)) if *kb == key => {
+                                // 持续可见，等待满 hold
+                            }
+                            _ => {
+                                log::info!(
+                                    "roam candidate: {} sig={} (need +{roam_margin_db} dB vs {rssi}, hold {roam_hold_secs}s)",
+                                    peer.bssid,
+                                    peer.signal
+                                );
+                                roam_pending = Some((key, Instant::now()));
+                            }
+                        }
+                    } else {
+                        roam_pending = None;
+                    }
+                } else if !want_roam_probe && hint == SwitchHint::None {
+                    roam_pending = None;
+                }
+
                 if let Some(peer) = target {
                     if peer.bssid.eq_ignore_ascii_case(&cur_bssid) {
                         sm.finish_switch_ok();
@@ -1535,15 +1605,22 @@ fn main() {
                     let same_ssid = peer.ssid == ssid;
                     let reason = if weak_rescue && hint == SwitchHint::None {
                         "WeakRescue"
+                    } else if roam_fire {
+                        "SameBandRoam"
                     } else {
                         "Score"
+                    };
+                    let hint_log = if roam_fire {
+                        SwitchHint::SameBandRoam
+                    } else {
+                        hint
                     };
                     let from_band = band.to_string();
                     let to_band = if peer.freq > 5000 { "5" } else { "2.4" }.to_string();
                     let switch_t0 = Instant::now();
                     log::info!(
                         "switch {reason}/{:?}: {} {} ssid={} freq={} sig={} score={score:.1}",
-                        hint,
+                        hint_log,
                         if same_ssid { "ROAM" } else { "SELECT" },
                         peer.bssid,
                         peer.ssid,
