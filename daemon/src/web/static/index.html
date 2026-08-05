@@ -1068,8 +1068,13 @@ async function saveHomeAps() {
 
 async function clearHomeAps() {
   homeSelected = {};
+  // 同步取消列表勾选（以前只清内存，DOM 勾仍在）
+  document.querySelectorAll('#scanItems input[type=checkbox]').forEach((el) => {
+    el.checked = false;
+  });
   updateHomeSummary();
   await saveHomeAps();
+  $('scanMsg').textContent = '家网已清空';
 }
 
 async function saveHoldSecs() {

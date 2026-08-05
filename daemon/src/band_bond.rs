@@ -403,36 +403,43 @@ pub fn scan_views(scans: &[ScanAp], home: &[HomeAp]) -> Vec<ScanApView> {
     v
 }
 
-/// 同 ssid_stem 下同时有 2.4 与 5 → 整组标 suggested（供面板预勾 / 一键采纳）
+/// 同 ssid_stem 下同时有 2.4 与 5 → **每 stem 只标最强 2.4 + 最强 5**（最多 2 个，避免 12 个全亮）
 pub fn mark_suggested_stem_pairs(views: &mut [ScanApView]) {
     use std::collections::HashMap;
-    // stem -> (has_24, has_5, indices)
-    let mut groups: HashMap<String, (bool, bool, Vec<usize>)> = HashMap::new();
+    // stem -> (best_24_idx, best_24_sig, best_5_idx, best_5_sig)
+    let mut best: HashMap<String, (Option<(usize, i32)>, Option<(usize, i32)>)> = HashMap::new();
     for (i, a) in views.iter().enumerate() {
         if a.ssid.is_empty() {
             continue;
         }
         let stem = ssid_stem(&a.ssid);
-        if stem.is_empty() {
+        // 过短 stem 易把无关网扫成一对（如单字母）
+        if stem.len() < 3 {
             continue;
         }
         let is5 = a.band == "5" || a.freq > 5000;
-        let e = groups.entry(stem).or_insert((false, false, Vec::new()));
+        let e = best.entry(stem).or_insert((None, None));
         if is5 {
-            e.1 = true;
-        } else {
-            e.0 = true;
-        }
-        e.2.push(i);
-    }
-    for (_stem, (has24, has5, idxs)) in groups {
-        if !(has24 && has5) {
-            continue;
-        }
-        for i in idxs {
-            if let Some(v) = views.get_mut(i) {
-                v.suggested = true;
+            match e.1 {
+                Some((_, sig)) if a.signal <= sig => {}
+                _ => e.1 = Some((i, a.signal)),
             }
+        } else {
+            match e.0 {
+                Some((_, sig)) if a.signal <= sig => {}
+                _ => e.0 = Some((i, a.signal)),
+            }
+        }
+    }
+    for (_stem, (b24, b5)) in best {
+        let (Some((i24, _)), Some((i5, _))) = (b24, b5) else {
+            continue;
+        };
+        if let Some(v) = views.get_mut(i24) {
+            v.suggested = true;
+        }
+        if let Some(v) = views.get_mut(i5) {
+            v.suggested = true;
         }
     }
 }
@@ -521,5 +528,53 @@ mod ssid_decode_tests {
         mark_suggested_stem_pairs(&mut v);
         assert!(v[0].suggested && v[1].suggested);
         assert!(!v[2].suggested);
+    }
+
+    #[test]
+    fn suggests_only_strongest_pair_per_stem() {
+        let mut v = vec![
+            ScanApView {
+                bssid: "a1".into(),
+                ssid: "HOME".into(),
+                freq: 2412,
+                signal: -70,
+                band: "2.4".into(),
+                in_home: false,
+                suggested: false,
+            },
+            ScanApView {
+                bssid: "a2".into(),
+                ssid: "HOME".into(),
+                freq: 2412,
+                signal: -40,
+                band: "2.4".into(),
+                in_home: false,
+                suggested: false,
+            },
+            ScanApView {
+                bssid: "b1".into(),
+                ssid: "HOME_5G".into(),
+                freq: 5180,
+                signal: -60,
+                band: "5".into(),
+                in_home: false,
+                suggested: false,
+            },
+            ScanApView {
+                bssid: "b2".into(),
+                ssid: "HOME_5G".into(),
+                freq: 5180,
+                signal: -45,
+                band: "5".into(),
+                in_home: false,
+                suggested: false,
+            },
+        ];
+        mark_suggested_stem_pairs(&mut v);
+        // 每 stem 仅最强 2.4 + 最强 5
+        assert!(!v[0].suggested);
+        assert!(v[1].suggested);
+        assert!(!v[2].suggested);
+        assert!(v[3].suggested);
     }
 }
