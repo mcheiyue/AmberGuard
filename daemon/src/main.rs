@@ -10,7 +10,7 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 use crate::band_bond::{
     best_on_band, dual_band_pair_saved, home_contains, link_in_home, merge_scan_aps,
     network_id_for_ssid, parse_cmd_scan_results, parse_list_networks, parse_scan_results,
-    scan_views,
+    scan_views_filtered, stems_from_ssids,
 };
 use crate::config::{Config, ConfigPatch};
 use crate::health_score::health_score;
@@ -772,10 +772,22 @@ fn main() {
                             .args(["wifi", "start-scan"])
                             .output();
                         thread::sleep(Duration::from_millis(1500));
-                        let wpa_aps = {
+                        let (wpa_aps, saved_ssids, cur_ssid) = {
                             let w = wpa_http.lock().map_err(|e| e.to_string())?;
                             let raw = w.scan_results().unwrap_or_default();
-                            parse_scan_results(&raw)
+                            let aps = parse_scan_results(&raw);
+                            let list_raw = w.list_networks().unwrap_or_default();
+                            let wpa_ssids: Vec<String> = parse_list_networks(&list_raw)
+                                .into_iter()
+                                .map(|(_, s)| s)
+                                .collect();
+                            let saved = wifi_framework::merge_saved_ssids(&wpa_ssids);
+                            let cur = w
+                                .status()
+                                .ok()
+                                .and_then(|s| s.ssid)
+                                .unwrap_or_default();
+                            (aps, saved, cur)
                         };
                         let cmd_aps = {
                             let out = std::process::Command::new("cmd")
@@ -794,7 +806,13 @@ fn main() {
                             .unwrap_or_default()
                         };
                         let aps = merge_scan_aps(wpa_aps, cmd_aps);
-                        Ok(scan_views(&aps, &home))
+                        // 双频候选仅限：系统已保存 + 当前连接 的 stem（邻居不标）
+                        let mut stem_ssids = saved_ssids;
+                        if !cur_ssid.is_empty() {
+                            stem_ssids.push(cur_ssid);
+                        }
+                        let allow = stems_from_ssids(&stem_ssids);
+                        Ok(scan_views_filtered(&aps, &home, Some(&allow)))
                     })();
                     match scan_res {
                         Ok(list) => {

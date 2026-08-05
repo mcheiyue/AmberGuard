@@ -348,11 +348,11 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="btns">
           <button class="primary" type="button" onclick="scanAps()">扫描附近 AP</button>
           <button type="button" onclick="addCurrentHome()">当前加入</button>
-          <button type="button" onclick="adoptSuggestedHomes()">采纳建议对</button>
+          <button type="button" onclick="adoptSuggestedHomes()">采纳双频组</button>
           <button type="button" onclick="saveHomeAps()">保存家网</button>
           <button type="button" onclick="clearHomeAps()">清空家网</button>
         </div>
-        <p class="note detail" style="margin-top:8px">「当前加入」= 只加当前 AP；「采纳建议对」= 写入扫描里同名双频（同 stem）预勾项。</p>
+        <p class="note detail" style="margin-top:8px">「双频组」= 系统已保存/当前连接的同名双频（可含主+副多 BSSID）。不会预勾邻居。请勾选后点保存，或点「采纳双频组」。</p>
         <p class="note" id="homeSummary" style="margin-top:4px">已选 0 个</p>
         <div id="scanList" style="margin-top:10px;max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--panel2);font-size:12px;display:none">
           <div id="scanItems"></div>
@@ -978,14 +978,7 @@ async function scanAps() {
     const items = $('scanItems');
     items.innerHTML = '';
     let sugN = 0;
-    const homeWasEmpty = Object.keys(homeSelected).length === 0;
-    if (homeWasEmpty) {
-      for (const a of list) {
-        if (!a.suggested || !a.bssid) continue;
-        const k = String(a.bssid).toLowerCase();
-        homeSelected[k] = { bssid: a.bssid, ssid: a.ssid || '', band: a.band || 'auto' };
-      }
-    }
+    // 不自动预勾：避免空家网时把候选全塞进 homeSelected
     for (const a of list) {
       const key = (a.bssid || '').toLowerCase();
       const sug = !!a.suggested;
@@ -998,7 +991,7 @@ async function scanAps() {
         '<input type="checkbox" data-bssid="' + key + '" data-ssid="' + escHtml(a.ssid || '') + '" data-band="' + (a.band || 'auto') + '"' + (checked ? ' checked' : '') + '>' +
         '<div style="flex:1;min-width:0">' +
         '<div style="font-weight:600;word-break:break-all">' + escHtml(a.ssid || '(隐藏)') + ' · ' + bandLabel(a.band) +
-        (sug ? ' <span style="color:var(--amber);font-weight:500">建议</span>' : '') + '</div>' +
+        (sug ? ' <span style="color:var(--amber);font-weight:500">双频组</span>' : '') + '</div>' +
         '<div style="color:var(--muted);font-family:var(--mono);font-size:11px">' + a.bssid + ' · ' + a.signal + ' dBm</div>' +
         '</div>';
       const cb = row.querySelector('input');
@@ -1011,7 +1004,7 @@ async function scanAps() {
     }
     $('scanList').style.display = 'block';
     $('scanMsg').textContent = '扫到 ' + list.length + ' 个' +
-      (sugN ? '，其中 ' + sugN + ' 个同 stem 双频建议对（可点「采纳建议对」）' : '，勾选后点「保存家网」');
+      (sugN ? '，其中 ' + sugN + ' 个属已保存/当前连接的双频组（可点「采纳双频组」）' : '，勾选后点「保存家网」');
     updateHomeSummary();
   } catch (e) {
     $('scanMsg').textContent = '';
@@ -1037,10 +1030,15 @@ async function adoptSuggestedHomes() {
       homeSelected[key] = { bssid: a.bssid, ssid: a.ssid || '', band: a.band || 'auto' };
       n++;
     }
-    if (!n) throw new Error('没有建议对：请先扫描，且需同 stem 同时有 2.4 与 5');
+    if (!n) throw new Error('没有双频组：请先扫描；仅系统已保存/当前连接的同名双频会标出');
+    // 勾选 DOM 与 homeSelected 一致
+    document.querySelectorAll('#scanItems input[type=checkbox]').forEach((el) => {
+      const k = el.getAttribute('data-bssid') || '';
+      el.checked = !!homeSelected[k];
+    });
     await saveHomeAps();
     updateHomeSummary();
-    $('scanMsg').textContent = '已采纳建议对 ' + n + ' 个 AP 并保存';
+    $('scanMsg').textContent = '已采纳双频组 ' + n + ' 个 AP 并保存';
   } catch (e) {
     $('scanErr').textContent = e.message;
   }

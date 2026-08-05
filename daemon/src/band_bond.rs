@@ -386,6 +386,15 @@ pub struct ScanApView {
 }
 
 pub fn scan_views(scans: &[ScanAp], home: &[HomeAp]) -> Vec<ScanApView> {
+    scan_views_filtered(scans, home, None)
+}
+
+/// `allowed_stems`：仅这些 stem 可标双频候选（已保存/当前连接）；None=旧行为不推荐，当作空
+pub fn scan_views_filtered(
+    scans: &[ScanAp],
+    home: &[HomeAp],
+    allowed_stems: Option<&std::collections::HashSet<String>>,
+) -> Vec<ScanApView> {
     let mut v: Vec<ScanApView> = scans
         .iter()
         .map(|a| ScanApView {
@@ -398,48 +407,61 @@ pub fn scan_views(scans: &[ScanAp], home: &[HomeAp]) -> Vec<ScanApView> {
             suggested: false,
         })
         .collect();
-    mark_suggested_stem_pairs(&mut v);
+    mark_suggested_stem_pairs(&mut v, allowed_stems);
     v.sort_by(|a, b| b.signal.cmp(&a.signal));
     v
 }
 
-/// 同 ssid_stem 下同时有 2.4 与 5 → **每 stem 只标最强 2.4 + 最强 5**（最多 2 个，避免 12 个全亮）
-pub fn mark_suggested_stem_pairs(views: &mut [ScanApView]) {
+/// 从 SSID 列表生成允许的 stem 集合（小写比较用原 stem 字符串）
+pub fn stems_from_ssids(ssids: &[String]) -> std::collections::HashSet<String> {
+    ssids
+        .iter()
+        .filter(|s| !s.is_empty())
+        .map(|s| ssid_stem(s))
+        .filter(|s| s.len() >= 3)
+        .collect()
+}
+
+/// 仅 `allowed_stems` 内、且同 stem 同时有 2.4+5 时：
+/// **该 stem 下所有可见 BSSID 都标 suggested**（主+副路由可 4 个，不限最强一对）
+pub fn mark_suggested_stem_pairs(
+    views: &mut [ScanApView],
+    allowed_stems: Option<&std::collections::HashSet<String>>,
+) {
     use std::collections::HashMap;
-    // stem -> (best_24_idx, best_24_sig, best_5_idx, best_5_sig)
-    let mut best: HashMap<String, (Option<(usize, i32)>, Option<(usize, i32)>)> = HashMap::new();
+    let Some(allow) = allowed_stems else {
+        return; // 无白名单 → 不标，避免邻居刷屏
+    };
+    if allow.is_empty() {
+        return;
+    }
+    // stem -> (has24, has5, indices)
+    let mut groups: HashMap<String, (bool, bool, Vec<usize>)> = HashMap::new();
     for (i, a) in views.iter().enumerate() {
         if a.ssid.is_empty() {
             continue;
         }
         let stem = ssid_stem(&a.ssid);
-        // 过短 stem 易把无关网扫成一对（如单字母）
-        if stem.len() < 3 {
+        if stem.len() < 3 || !allow.contains(&stem) {
             continue;
         }
         let is5 = a.band == "5" || a.freq > 5000;
-        let e = best.entry(stem).or_insert((None, None));
+        let e = groups.entry(stem).or_insert((false, false, Vec::new()));
         if is5 {
-            match e.1 {
-                Some((_, sig)) if a.signal <= sig => {}
-                _ => e.1 = Some((i, a.signal)),
-            }
+            e.1 = true;
         } else {
-            match e.0 {
-                Some((_, sig)) if a.signal <= sig => {}
-                _ => e.0 = Some((i, a.signal)),
-            }
+            e.0 = true;
         }
+        e.2.push(i);
     }
-    for (_stem, (b24, b5)) in best {
-        let (Some((i24, _)), Some((i5, _))) = (b24, b5) else {
+    for (_stem, (has24, has5, idxs)) in groups {
+        if !(has24 && has5) {
             continue;
-        };
-        if let Some(v) = views.get_mut(i24) {
-            v.suggested = true;
         }
-        if let Some(v) = views.get_mut(i5) {
-            v.suggested = true;
+        for i in idxs {
+            if let Some(v) = views.get_mut(i) {
+                v.suggested = true;
+            }
         }
     }
 }
@@ -496,6 +518,7 @@ mod ssid_decode_tests {
 
     #[test]
     fn suggests_stem_dual_band_pair() {
+        use std::collections::HashSet;
         let mut v = vec![
             ScanApView {
                 bssid: "aa:aa:aa:aa:aa:01".into(),
@@ -525,13 +548,15 @@ mod ssid_decode_tests {
                 suggested: false,
             },
         ];
-        mark_suggested_stem_pairs(&mut v);
+        let allow: HashSet<String> = ["MERCURY_C8B5".into()].into_iter().collect();
+        mark_suggested_stem_pairs(&mut v, Some(&allow));
         assert!(v[0].suggested && v[1].suggested);
         assert!(!v[2].suggested);
     }
 
     #[test]
-    fn suggests_only_strongest_pair_per_stem() {
+    fn suggests_all_bssids_on_allowed_stem_not_neighbors() {
+        use std::collections::HashSet;
         let mut v = vec![
             ScanApView {
                 bssid: "a1".into(),
@@ -569,12 +594,35 @@ mod ssid_decode_tests {
                 in_home: false,
                 suggested: false,
             },
+            ScanApView {
+                bssid: "n1".into(),
+                ssid: "NEIGHBOR".into(),
+                freq: 2412,
+                signal: -30,
+                band: "2.4".into(),
+                in_home: false,
+                suggested: false,
+            },
+            ScanApView {
+                bssid: "n2".into(),
+                ssid: "NEIGHBOR_5G".into(),
+                freq: 5180,
+                signal: -35,
+                band: "5".into(),
+                in_home: false,
+                suggested: false,
+            },
         ];
-        mark_suggested_stem_pairs(&mut v);
-        // 每 stem 仅最强 2.4 + 最强 5
-        assert!(!v[0].suggested);
-        assert!(v[1].suggested);
-        assert!(!v[2].suggested);
-        assert!(v[3].suggested);
+        let allow: HashSet<String> = ["HOME".into()].into_iter().collect();
+        mark_suggested_stem_pairs(&mut v, Some(&allow));
+        // 自家 stem 4 个全标；邻居不标
+        assert!(v[0].suggested && v[1].suggested && v[2].suggested && v[3].suggested);
+        assert!(!v[4].suggested && !v[5].suggested);
+        // 无白名单不标
+        for x in v.iter_mut() {
+            x.suggested = false;
+        }
+        mark_suggested_stem_pairs(&mut v, None);
+        assert!(v.iter().all(|x| !x.suggested));
     }
 }
