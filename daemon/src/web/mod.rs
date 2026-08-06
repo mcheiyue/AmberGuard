@@ -13,10 +13,16 @@ pub struct StatusSnapshot {
     pub last_error: String,
     /// 当前生效的阈值摘要（便于面板展示，无需再拉 /api/config）
     pub thresholds: ThresholdsView,
-    /// 手动切网保护剩余秒数（0=未在保护）
+    /// 保护剩余秒数（0=未在保护）；手切或观影
     pub hold_remaining_secs: u64,
-    /// 配置的保护时长（便于设置页展示）
+    /// 保护种类："" | "manual" | "soft_pause"
+    #[serde(default)]
+    pub hold_kind: String,
+    /// 配置的手切保护时长（便于设置页展示）
     pub user_hold_secs: u64,
+    /// wpa 链路控制：ok / reconnect / fail
+    #[serde(default)]
+    pub link_ctrl: String,
     /// 家网 AP 数量（0=未配置，走启发式）
     pub home_ap_count: usize,
     /// 当前链路是否在家网内（未配置家网时恒 true）
@@ -108,7 +114,9 @@ impl StatusSnapshot {
                 mode: d.mode,
             },
             hold_remaining_secs: 0,
+            hold_kind: String::new(),
             user_hold_secs: d.user_hold_secs,
+            link_ctrl: "ok".into(),
             home_ap_count: 0,
             in_home: true,
             block_reason: String::new(),

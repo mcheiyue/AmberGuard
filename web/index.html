@@ -180,7 +180,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
   <main>
     <div class="banner" id="holdBanner">
       <div>
-        <strong>手动切网保护中</strong>
+        <strong id="holdTitle">保护中</strong>
         <div class="note" style="margin:2px 0 0" id="holdText">守护暂停，避免抢回你的选择</div>
       </div>
       <div class="btns">
@@ -487,7 +487,9 @@ function labelSm(s) {
   if (!s) return '—';
   const raw = String(s);
   const m = raw.match(/^USER_HOLD\((\d+)s\)$/i);
-  if (m) return '手动保护（' + m[1] + '秒）';
+  if (m) return '手切保护（' + m[1] + '秒）';
+  const sp = raw.match(/^SOFT_PAUSE\((\d+)s\)$/i);
+  if (sp) return '观影保护（' + sp[1] + '秒）';
   const map = {
     Idle: '待命',
     GradientDetect: '观察中',
@@ -1248,12 +1250,24 @@ async function tick() {
       thh.textContent = base + (l3z ? ((base ? ' · ' : '') + 'L3：' + l3z) : '');
     }
     const holdRem = j.hold_remaining_secs || 0;
+    const holdKind = j.hold_kind || '';
     const ban = $('holdBanner');
+    const linkCtrl = j.link_ctrl || 'ok';
     if (holdRem > 0) {
       ban.classList.add('on');
-      $('holdText').textContent = '还剩 ' + holdRem + ' 秒恢复自动切换';
-      $('conn').textContent = '手动保护';
+      const isSoft = holdKind === 'soft_pause' || String(j.power_state||'').indexOf('SOFT_PAUSE')===0;
+      const ht = $('holdTitle');
+      if (ht) ht.textContent = isSoft ? '观影保护中' : '手切保护中';
+      $('holdText').textContent = (isSoft ? '观影暂停自动切 · 还剩 ' : '手切优先 · 还剩 ') + holdRem + ' 秒';
+      $('conn').textContent = isSoft ? '观影保护' : '手切保护';
       $('conn').className = 'pill warn';
+    } else if (linkCtrl === 'reconnect' || linkCtrl === 'fail') {
+      ban.classList.add('on');
+      const ht2 = $('holdTitle');
+      if (ht2) ht2.textContent = '链路控制';
+      $('holdText').textContent = linkCtrl === 'fail' ? 'wpa 重连失败，请检查 Wi-Fi' : 'wpa 异常，正在重连…';
+      $('conn').textContent = linkCtrl === 'fail' ? '链路失败' : '重连中';
+      $('conn').className = 'pill bad';
     } else if (j.power_state === 'WEAK_OFF') {
       ban.classList.add('on');
       $('holdText').textContent = '弱信号已断开' + (j.last_error ? ' · ' + j.last_error : '');

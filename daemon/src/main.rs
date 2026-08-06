@@ -65,7 +65,10 @@ fn mode_zh(mode: &str) -> &'static str {
 fn power_zh(ps: &str) -> String {
     let p = ps.trim();
     if p.starts_with("USER_HOLD") {
-        return "手动保护中".into();
+        return "手切保护中".into();
+    }
+    if p.starts_with("SOFT_PAUSE") {
+        return "观影保护中".into();
     }
     match p {
         "Idle" | "idle" => "守护中".into(),
@@ -80,6 +83,70 @@ fn power_zh(ps: &str) -> String {
         "" => "—".into(),
         other => other.to_string(),
     }
+}
+
+/// 保护种类：手切 vs 观影（不再混称）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoldKind {
+    Manual,
+    SoftPause,
+}
+
+impl HoldKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            HoldKind::Manual => "manual",
+            HoldKind::SoftPause => "soft_pause",
+        }
+    }
+    fn block_zh(self, rem: u64) -> String {
+        match self {
+            HoldKind::Manual => format!("手切保护中（剩 {rem}s，不自动切网）"),
+            HoldKind::SoftPause => format!("观影保护中（剩 {rem}s，不自动切网）"),
+        }
+    }
+    fn summary_zh(self, rem: u64) -> String {
+        match self {
+            HoldKind::Manual => format!("手切保护 · {rem}s（可点结束保护）"),
+            HoldKind::SoftPause => format!("观影保护 · {rem}s（可点结束保护）"),
+        }
+    }
+    fn power_state(self, rem: u64) -> String {
+        match self {
+            HoldKind::Manual => format!("USER_HOLD({rem}s)"),
+            HoldKind::SoftPause => format!("SOFT_PAUSE({rem}s)"),
+        }
+    }
+}
+
+struct HoldState {
+    until: Instant,
+    kind: HoldKind,
+}
+
+/// status.txt：状态边沿立即写；相同内容最多 15s 写一次
+fn write_status_txt(line: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex as StdMutex;
+    static LAST_TS: AtomicU64 = AtomicU64::new(0);
+    static LAST_LINE: StdMutex<String> = StdMutex::new(String::new());
+    let now = unix_now();
+    let changed = {
+        let mut prev = LAST_LINE.lock().unwrap_or_else(|e| e.into_inner());
+        if *prev != line {
+            *prev = line.to_string();
+            true
+        } else {
+            false
+        }
+    };
+    let prev_ts = LAST_TS.load(Ordering::Relaxed);
+    if !changed && now.saturating_sub(prev_ts) < 15 {
+        return;
+    }
+    LAST_TS.store(now, Ordering::Relaxed);
+    let _ = std::fs::create_dir_all("/data/adb/amberguard");
+    let _ = std::fs::write("/data/adb/amberguard/status.txt", format!("{line}\n"));
 }
 
 fn band_zh(band: &str) -> &'static str {
@@ -294,21 +361,23 @@ impl L3Kind {
     }
 }
 
-/// L3：多终点。国内 gstatic 常 DNS 失败 → 不因此判切网失败。
+/// L3：国内优先。gstatic/msft 常 DNS 失败只作次选，不因此判切网失败。
 /// 204=通；HTTP 其它码像门户；全连不上=timeout/net。
 fn l3_probe(timeout: Duration) -> Result<L3Kind, (L3Kind, String)> {
-    let http_targets: &[(&str, u16, &str, &str)] = &[
+    // 主终点：小米 ROM 连通性（国内稳）
+    let primary: &[(&str, u16, &str, &str)] = &[(
+        "connect.rom.miui.com",
+        80,
+        "/generate_204",
+        "connect.rom.miui.com",
+    )];
+    // 次选：国外/微软（失败不刷屏，仅记 last）
+    let secondary: &[(&str, u16, &str, &str)] = &[
         (
             "connectivitycheck.gstatic.com",
             80,
             "/generate_204",
             "connectivitycheck.gstatic.com",
-        ),
-        (
-            "connect.rom.miui.com",
-            80,
-            "/generate_204",
-            "connect.rom.miui.com",
         ),
         (
             "www.msftconnecttest.com",
@@ -320,7 +389,7 @@ fn l3_probe(timeout: Duration) -> Result<L3Kind, (L3Kind, String)> {
     let mut last = (L3Kind::Timeout, String::from("无终点"));
     let mut saw_portal = false;
     let mut portal_detail = String::new();
-    for (host, port, path, hdr) in http_targets {
+    for (host, port, path, hdr) in primary.iter().chain(secondary.iter()) {
         match l3_http_one(host, *port, path, hdr, timeout) {
             Ok(L3Kind::Ok) => return Ok(L3Kind::Ok),
             Ok(L3Kind::Portal) => {
@@ -328,13 +397,20 @@ fn l3_probe(timeout: Duration) -> Result<L3Kind, (L3Kind, String)> {
                 portal_detail = format!("{host} 非 204");
             }
             Ok(k) => last = (k, host.to_string()),
-            Err((k, e)) => last = (k, e),
+            Err((k, e)) => {
+                // DNS 失败只 debug，避免日志刷 OkL3Warn 噪声
+                if e.contains("DNS") {
+                    log::debug!("L3 skip {host}: {e}");
+                }
+                last = (k, e);
+            }
         }
     }
     if saw_portal {
         return Err((L3Kind::Portal, portal_detail));
     }
-    for ip in &["223.5.5.5:53", "1.1.1.1:80", "8.8.8.8:53"] {
+    // 裸 IP：国内 DNS 优先
+    for ip in &["223.5.5.5:80", "223.5.5.5:53", "1.1.1.1:80"] {
         if let Ok(addr) = ip.parse() {
             if TcpStream::connect_timeout(&addr, timeout).is_ok() {
                 return Ok(L3Kind::Ok);
@@ -413,8 +489,8 @@ fn status_summary_zh(
         return "已暂停 · 仅观测".into();
     }
     if hold_rem > 0 {
-        // 手切 hold 与观影 soft-pause 共用 hold_until
-        return format!("保护中 · {hold_rem}s（手切或观影，可点结束保护）");
+        // hold_kind 由调用方写入 summary 前已区分；此处兜底
+        return format!("保护中 · {hold_rem}s（可点结束保护）");
     }
     if screen_off {
         return "息屏降频 · 不主动切".into();
@@ -506,8 +582,8 @@ fn main() {
     };
     let wpa = Arc::new(Mutex::new(wpa));
     let snapshot = Arc::new(Mutex::new(StatusSnapshot::new()));
-    // 手动切网保护截止时间；HTTP 可 clear / soft-pause
-    let hold_until: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    // 手切 / 观影 分种类保护；HTTP 可 clear / soft-pause
+    let hold_state: Arc<Mutex<Option<HoldState>>> = Arc::new(Mutex::new(None));
     let history: Arc<Mutex<VecDeque<SwitchEvent>>> =
         Arc::new(Mutex::new(load_history()));
     let mut sm = StateMachine::new();
@@ -520,7 +596,7 @@ fn main() {
 
     let snapshot_http = Arc::clone(&snapshot);
     let config_http = Arc::clone(&config);
-    let hold_http = Arc::clone(&hold_until);
+    let hold_http = Arc::clone(&hold_state);
     let wpa_http = Arc::clone(&wpa);
     let history_http = Arc::clone(&history);
     thread::spawn(move || {
@@ -733,17 +809,31 @@ fn main() {
                     }
                     if let Ok(mut s) = snapshot_http.lock() {
                         s.hold_remaining_secs = 0;
+                        s.hold_kind.clear();
                         s.block_reason.clear();
                         s.summary.clear();
                         if s.power_state.starts_with("USER_HOLD")
+                            || s.power_state.starts_with("SOFT_PAUSE")
                             || s.power_state.contains("HOLD")
-                            || s.power_state == "SOFT_PAUSE"
                         {
                             s.power_state = "ON".into();
                         }
+                        let line = status_line_zh(
+                            &s.thresholds.mode,
+                            &s.ssid,
+                            &s.band,
+                            s.score,
+                            &s.power_state,
+                            "",
+                        );
+                        write_status_txt(&line);
+                        update_module_description(&line);
                     }
-                    log::info!("user_hold cleared via API");
-                    json_resp("{\"ok\":true,\"hold_remaining_secs\":0}".into(), StatusCode(200))
+                    log::info!("hold cleared via API");
+                    json_resp(
+                        "{\"ok\":true,\"hold_remaining_secs\":0,\"hold_kind\":\"\"}".into(),
+                        StatusCode(200),
+                    )
                 }
                 (Method::Get, "/api/soft-pause") | (Method::Post, "/api/soft-pause") => {
                     // ?mins=20 默认 20
@@ -762,10 +852,34 @@ fn main() {
                         .unwrap_or(20)
                         .clamp(1, 180);
                     let until = Instant::now() + Duration::from_secs(mins * 60);
-                    *hold_http.lock().unwrap() = Some(until);
+                    *hold_http.lock().unwrap() = Some(HoldState {
+                        until,
+                        kind: HoldKind::SoftPause,
+                    });
+                    if let Ok(mut s) = snapshot_http.lock() {
+                        let rem = mins * 60;
+                        s.hold_remaining_secs = rem;
+                        s.hold_kind = HoldKind::SoftPause.as_str().into();
+                        s.power_state = HoldKind::SoftPause.power_state(rem);
+                        s.block_reason = HoldKind::SoftPause.block_zh(rem);
+                        s.summary = HoldKind::SoftPause.summary_zh(rem);
+                        let line = status_line_zh(
+                            &s.thresholds.mode,
+                            &s.ssid,
+                            &s.band,
+                            s.score,
+                            &s.power_state,
+                            &s.block_reason,
+                        );
+                        write_status_txt(&line);
+                        update_module_description(&line);
+                    }
                     log::info!("soft-pause {mins} min via API");
                     json_resp(
-                        format!("{{\"ok\":true,\"mins\":{mins},\"hold_remaining_secs\":{}}}", mins * 60),
+                        format!(
+                            "{{\"ok\":true,\"mins\":{mins},\"hold_remaining_secs\":{},\"hold_kind\":\"soft_pause\"}}",
+                            mins * 60
+                        ),
                         StatusCode(200),
                     )
                 }
@@ -1093,18 +1207,19 @@ fn main() {
             15
         };
 
-        // hold 剩余
-        let hold_rem = {
-            let mut h = hold_until.lock().unwrap();
-            match *h {
-                Some(until) if Instant::now() < until => {
-                    until.saturating_duration_since(Instant::now()).as_secs()
+        // hold 剩余 + 种类
+        let (hold_rem, hold_kind_now) = {
+            let mut h = hold_state.lock().unwrap();
+            match h.as_ref() {
+                Some(st) if Instant::now() < st.until => {
+                    let rem = st.until.saturating_duration_since(Instant::now()).as_secs();
+                    (rem, Some(st.kind))
                 }
                 Some(_) => {
                     *h = None;
-                    0
+                    (0, None)
                 }
-                None => 0,
+                None => (0, None),
             }
         };
 
@@ -1141,10 +1256,13 @@ fn main() {
                     .unwrap_or(false);
                 if !our && hold_secs > 0 && !paused {
                     let until = Instant::now() + Duration::from_secs(hold_secs);
-                    *hold_until.lock().unwrap() = Some(until);
+                    *hold_state.lock().unwrap() = Some(HoldState {
+                        until,
+                        kind: HoldKind::Manual,
+                    });
                     sm.reset_soft();
                     log::info!(
-                        "manual switch detected {} -> {} ; user_hold {}s",
+                        "manual switch detected {} -> {} ; manual_hold {}s",
                         prev_link_key,
                         link_key,
                         hold_secs
@@ -1203,13 +1321,16 @@ fn main() {
                 band == "2.4"
             };
 
-            let hold_rem_now = {
-                let h = hold_until.lock().unwrap();
-                match *h {
-                    Some(until) if Instant::now() < until => {
-                        until.saturating_duration_since(Instant::now()).as_secs()
-                    }
-                    _ => 0,
+            let (hold_rem_now, hold_kind_now) = {
+                let h = hold_state.lock().unwrap();
+                match h.as_ref() {
+                    Some(st) if Instant::now() < st.until => (
+                        st.until
+                            .saturating_duration_since(Instant::now())
+                            .as_secs(),
+                        Some(st.kind),
+                    ),
+                    _ => (0, None),
                 }
             };
 
@@ -1229,8 +1350,8 @@ fn main() {
             // 中文原因条（阻塞 > 阈值对照提示）
             let block_reason = if paused {
                 "已暂停守护".to_string()
-            } else if hold_rem_now > 0 {
-                format!("保护中（剩 {hold_rem_now}s，手切或观影）")
+            } else if let Some(k) = hold_kind_now {
+                k.block_zh(hold_rem_now)
             } else if pen_rem > 0 {
                 format!("切换冷却中（剩 {pen_rem}s）")
             } else if screen_off {
@@ -1267,7 +1388,9 @@ fn main() {
                 s.band = band.into();
                 s.score = score;
                 s.hold_remaining_secs = hold_rem_now;
+                s.hold_kind = hold_kind_now.map(|k| k.as_str().into()).unwrap_or_default();
                 s.user_hold_secs = hold_secs;
+                s.link_ctrl = "ok".into();
                 s.home_ap_count = home_aps.len();
                 s.in_home = in_home_now;
                 s.block_reason = block_reason.clone();
@@ -1275,20 +1398,24 @@ fn main() {
                 s.best_5g_rssi = cached_best_5g;
                 s.penalty_remaining_secs = pen_rem;
                 s.bssid_lock_remaining_secs = lock_rem_secs;
-                s.summary = status_summary_zh(
-                    band,
-                    score,
-                    &mode,
-                    hold_rem_now,
-                    pen_rem,
-                    in_home_now,
-                    home_aps.len(),
-                    screen_off,
-                    paused,
-                    on_preferred,
-                    lock_rem_secs,
-                    preferred_is_5g,
-                );
+                s.summary = if let Some(k) = hold_kind_now {
+                    k.summary_zh(hold_rem_now)
+                } else {
+                    status_summary_zh(
+                        band,
+                        score,
+                        &mode,
+                        hold_rem_now,
+                        pen_rem,
+                        in_home_now,
+                        home_aps.len(),
+                        screen_off,
+                        paused,
+                        on_preferred,
+                        lock_rem_secs,
+                        preferred_is_5g,
+                    )
+                };
                 s.screen = if screen_off { "OFF" } else { "ON" }.into();
                 s.thresholds = ThresholdsView {
                     score_detect_threshold: detect_th,
@@ -1299,8 +1426,8 @@ fn main() {
                 if s.power_state != "PAUSE" {
                     if weak_disconnected {
                         s.power_state = "WEAK_OFF".into();
-                    } else if hold_rem_now > 0 {
-                        s.power_state = format!("USER_HOLD({hold_rem_now}s)");
+                    } else if let Some(k) = hold_kind_now {
+                        s.power_state = k.power_state(hold_rem_now);
                     } else if !in_home_now && !home_aps.is_empty() {
                         s.power_state = "OUT_OF_HOME".into();
                     } else if screen_off {
@@ -1318,10 +1445,7 @@ fn main() {
                     &s.power_state,
                     &block_reason,
                 );
-                let _ = std::fs::write(
-                    "/data/adb/amberguard/status.txt",
-                    format!("{line}\n"),
-                );
+                write_status_txt(&line);
                 update_module_description(&line);
             }
 
@@ -1991,32 +2115,38 @@ fn main() {
             {
                 let mut s = snapshot.lock().unwrap();
                 s.hold_remaining_secs = hold_rem;
+                s.hold_kind = hold_kind_now
+                    .map(|k| k.as_str().into())
+                    .unwrap_or_default();
                 s.user_hold_secs = hold_secs;
                 s.home_ap_count = home_aps.len();
+                s.link_ctrl = "reconnect".into();
                 s.screen = if screen_off { "OFF" } else { "ON" }.into();
                 s.block_reason = if paused {
                     "已暂停守护".into()
-                } else if hold_rem > 0 {
-                    format!("保护中（剩 {hold_rem}s，手切或观影）")
+                } else if let Some(k) = hold_kind_now {
+                    k.block_zh(hold_rem)
                 } else if screen_off {
                     "息屏降频，不主动切网".into()
                 } else {
-                    "wpa 状态读取失败，尝试重连".into()
+                    "链路控制异常，正在重连 wpa".into()
                 };
-                s.summary = if hold_rem > 0 {
-                    format!("保护中 · {hold_rem}s")
+                s.summary = if let Some(k) = hold_kind_now {
+                    k.summary_zh(hold_rem)
                 } else if screen_off {
                     "息屏降频".into()
                 } else {
-                    "wpa 异常 · 重连中".into()
+                    "链路控制 · 重连中".into()
                 };
-                if hold_rem > 0 {
-                    s.power_state = format!("USER_HOLD({hold_rem}s)");
+                if let Some(k) = hold_kind_now {
+                    s.power_state = k.power_state(hold_rem);
                 } else if paused {
                     s.power_state = "PAUSE".into();
                 } else if screen_off {
                     s.power_state = "SCREEN_OFF".into();
-                } else if s.power_state.starts_with("USER_HOLD") {
+                } else if s.power_state.starts_with("USER_HOLD")
+                    || s.power_state.starts_with("SOFT_PAUSE")
+                {
                     s.power_state = "ON".into();
                 }
                 let line = status_line_zh(
@@ -2027,7 +2157,7 @@ fn main() {
                     &s.power_state,
                     &s.block_reason,
                 );
-                let _ = std::fs::write("/data/adb/amberguard/status.txt", format!("{line}\n"));
+                write_status_txt(&line);
                 update_module_description(&line);
             }
             // 僵尸 ctrl socket：重连 wpa（不阻塞太久）
@@ -2037,8 +2167,19 @@ fn main() {
                     if let Ok(mut g) = wpa.lock() {
                         *g = w;
                     }
+                    if let Ok(mut s) = snapshot.lock() {
+                        s.link_ctrl = "ok".into();
+                    }
                 }
-                Err(e) => log::warn!("wpa reconnect failed: {e}"),
+                Err(e) => {
+                    log::warn!("wpa reconnect failed: {e}");
+                    if let Ok(mut s) = snapshot.lock() {
+                        s.link_ctrl = "fail".into();
+                        if s.block_reason.is_empty() || s.block_reason.contains("重连") {
+                            s.block_reason = format!("链路控制重连失败：{e}");
+                        }
+                    }
+                }
             }
         }
 
