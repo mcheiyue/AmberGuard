@@ -413,7 +413,8 @@ fn status_summary_zh(
         return "已暂停 · 仅观测".into();
     }
     if hold_rem > 0 {
-        return format!("手切/观影保护中 · {hold_rem}s");
+        // 手切 hold 与观影 soft-pause 共用 hold_until
+        return format!("保护中 · {hold_rem}s（手切或观影，可点结束保护）");
     }
     if screen_off {
         return "息屏降频 · 不主动切".into();
@@ -732,6 +733,14 @@ fn main() {
                     }
                     if let Ok(mut s) = snapshot_http.lock() {
                         s.hold_remaining_secs = 0;
+                        s.block_reason.clear();
+                        s.summary.clear();
+                        if s.power_state.starts_with("USER_HOLD")
+                            || s.power_state.contains("HOLD")
+                            || s.power_state == "SOFT_PAUSE"
+                        {
+                            s.power_state = "ON".into();
+                        }
                     }
                     log::info!("user_hold cleared via API");
                     json_resp("{\"ok\":true,\"hold_remaining_secs\":0}".into(), StatusCode(200))
@@ -1221,7 +1230,7 @@ fn main() {
             let block_reason = if paused {
                 "已暂停守护".to_string()
             } else if hold_rem_now > 0 {
-                format!("手动/观影保护中（剩 {hold_rem_now}s）")
+                format!("保护中（剩 {hold_rem_now}s，手切或观影）")
             } else if pen_rem > 0 {
                 format!("切换冷却中（剩 {pen_rem}s）")
             } else if screen_off {
@@ -1976,11 +1985,61 @@ fn main() {
                     }
                 }
             }
-        } else if let Ok(mut s) = snapshot.lock() {
-            s.hold_remaining_secs = hold_rem;
-            s.user_hold_secs = hold_secs;
-            s.home_ap_count = home_aps.len();
-            s.in_home = true;
+        } else {
+            // wpa STATUS 失败：仍必须刷新 hold/息屏文案，否则会永远卡在「保护中 30s」
+            log::warn!("wpa status failed — refresh snapshot + try reconnect");
+            {
+                let mut s = snapshot.lock().unwrap();
+                s.hold_remaining_secs = hold_rem;
+                s.user_hold_secs = hold_secs;
+                s.home_ap_count = home_aps.len();
+                s.screen = if screen_off { "OFF" } else { "ON" }.into();
+                s.block_reason = if paused {
+                    "已暂停守护".into()
+                } else if hold_rem > 0 {
+                    format!("保护中（剩 {hold_rem}s，手切或观影）")
+                } else if screen_off {
+                    "息屏降频，不主动切网".into()
+                } else {
+                    "wpa 状态读取失败，尝试重连".into()
+                };
+                s.summary = if hold_rem > 0 {
+                    format!("保护中 · {hold_rem}s")
+                } else if screen_off {
+                    "息屏降频".into()
+                } else {
+                    "wpa 异常 · 重连中".into()
+                };
+                if hold_rem > 0 {
+                    s.power_state = format!("USER_HOLD({hold_rem}s)");
+                } else if paused {
+                    s.power_state = "PAUSE".into();
+                } else if screen_off {
+                    s.power_state = "SCREEN_OFF".into();
+                } else if s.power_state.starts_with("USER_HOLD") {
+                    s.power_state = "ON".into();
+                }
+                let line = status_line_zh(
+                    &mode,
+                    &s.ssid,
+                    &s.band,
+                    s.score,
+                    &s.power_state,
+                    &s.block_reason,
+                );
+                let _ = std::fs::write("/data/adb/amberguard/status.txt", format!("{line}\n"));
+                update_module_description(&line);
+            }
+            // 僵尸 ctrl socket：重连 wpa（不阻塞太久）
+            match WpaCtrl::auto_connect() {
+                Ok(w) => {
+                    log::info!("wpa reconnected after status failure");
+                    if let Ok(mut g) = wpa.lock() {
+                        *g = w;
+                    }
+                }
+                Err(e) => log::warn!("wpa reconnect failed: {e}"),
+            }
         }
 
         thread::sleep(Duration::from_secs(1));
