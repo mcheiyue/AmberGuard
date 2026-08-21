@@ -184,7 +184,8 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="note" style="margin:2px 0 0" id="holdText">守护暂停，避免抢回你的选择</div>
       </div>
       <div class="btns">
-        <button class="primary" type="button" onclick="clearHold()">立即恢复</button>
+        <button class="primary" type="button" onclick="clearHold()" id="btnClearHold">立即恢复</button>
+        <button type="button" onclick="addCurrentHome()" id="btnJoinHome" style="display:none">加入当前</button>
       </div>
     </div>
     <!-- 状态 -->
@@ -287,6 +288,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="btns">
           <button class="primary" onclick="loadLogs()">刷新</button>
           <button onclick="clearLogs()">清空</button>
+          <button id="logFilterBtn" onclick="toggleLogFilter()">只看切换</button>
         </div>
         <pre class="logbox" id="logbox">加载中…</pre>
       </div>
@@ -333,7 +335,7 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
       </div>
       <div class="card">
         <h2>关于</h2>
-        <div class="row"><span class="k">版本</span><span class="v" id="aboutVer">v0.5.9</span></div>
+        <div class="row"><span class="k">版本</span><span class="v" id="aboutVer">—</span></div>
         <div class="row"><span class="k">面板</span><span class="v">127.0.0.1:8080</span></div>
         <div class="row"><span class="k">日志</span><span class="v" style="font-size:11px">/data/adb/amberguard/log/amberguard.log</span></div>
         <p class="note" style="margin-top:10px">
@@ -1167,12 +1169,38 @@ async function saveLockSecs() {
   }
 }
 
+let logRawContent = '';
+let logFilterOn = false;
+
+function applyLogFilter() {
+  const box = $('logbox');
+  if (!logFilterOn || !logRawContent) {
+    box.textContent = logRawContent || '(空)';
+    return;
+  }
+  const keywords = ['switch', '手动', 'roam', 'roam fire', 'roam candidate', 'OK ->', 'L3 probe', 'manual switch', 'weak disconnect', 'reconnect'];
+  const lines = logRawContent.split('\n').filter(l => keywords.some(k => l.includes(k)));
+  box.textContent = lines.length ? lines.join('\n') : '（无匹配切换行）';
+  box.scrollTop = 0;
+}
+
+function toggleLogFilter() {
+  logFilterOn = !logFilterOn;
+  const btn = $('logFilterBtn');
+  if (btn) {
+    btn.textContent = logFilterOn ? '全部日志' : '只看切换';
+    btn.className = logFilterOn ? 'primary' : '';
+  }
+  applyLogFilter();
+}
+
 async function loadLogs() {
   try {
     const r = await fetch('/api/logs?lines=300', { cache: 'no-store' });
     const j = await r.json();
     $('logPath').textContent = j.path || '';
-    $('logbox').textContent = j.content || '(空)';
+    logRawContent = j.content || '';
+    applyLogFilter();
     $('logbox').scrollTop = $('logbox').scrollHeight;
   } catch (e) {
     $('logbox').textContent = '读取失败: ' + e.message;
@@ -1183,6 +1211,7 @@ async function clearLogs() {
   if (!confirm('清空运行日志？')) return;
   try {
     await fetch('/api/logs/clear', { method: 'POST', cache: 'no-store' });
+    logRawContent = '';
     loadLogs();
   } catch (e) { $('logbox').textContent = e.message; }
 }
@@ -1200,6 +1229,8 @@ async function tick() {
     const sum = j.summary || '';
     if ($('summaryLine')) $('summaryLine').textContent = sum || '—';
     if ($('summaryTop') && sum) $('summaryTop').textContent = sum;
+    const verEl = $('aboutVer');
+    if (verEl && j.version) { verEl.textContent = 'v' + j.version; }
     $('ssid').textContent = j.ssid || '—';
     const band = j.band === '5' ? '5 GHz' : (j.band === '2.4' ? '2.4 GHz' : (j.band || '—'));
     const chip = $('bandchip');
@@ -1275,9 +1306,13 @@ async function tick() {
       $('conn').className = 'pill bad';
     } else if (j.power_state === 'OUT_OF_HOME') {
       ban.classList.add('on');
-      $('holdText').textContent = '当前不在家网，不自动切换（已选 ' + (j.home_ap_count || 0) + ' 个）';
+      $('holdText').textContent = '当前 AP 不在家网，不自动切换（已选 ' + (j.home_ap_count || 0) + ' 个）';
       $('conn').textContent = '非家网';
       $('conn').className = 'pill warn';
+      const jh = $('btnJoinHome');
+      if (jh) { jh.style.display = ''; }
+      const ch = $('btnClearHold');
+      if (ch) { ch.style.display = 'none'; }
     } else if (j.power_state === 'SCREEN_OFF') {
       ban.classList.add('on');
       $('holdText').textContent = '息屏降频中';
@@ -1285,6 +1320,11 @@ async function tick() {
       $('conn').className = 'pill';
     } else {
       ban.classList.remove('on');
+      // 重置「加入当前」按钮显示
+      const jh = $('btnJoinHome');
+      if (jh) { jh.style.display = 'none'; }
+      const ch = $('btnClearHold');
+      if (ch) { ch.style.display = ''; }
     }
     if (j.power_state === 'PAUSE' || (j.thresholds && j.thresholds.mode === 'pause')) {
       $('conn').textContent = '已暂停';

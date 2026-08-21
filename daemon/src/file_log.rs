@@ -75,7 +75,7 @@ impl Log for FileLogger {
             record.target(),
             record.args()
         );
-        let _ = std::io::stderr().write_all(line.as_bytes());
+        // ponytail: 仅写文件，不写 stderr（service.sh 仍会捕获 panic stderr）
         if let Ok(mut guard) = self.file.lock() {
             self.rotate_if_needed(&mut guard);
             if let Some(f) = guard.as_mut() {

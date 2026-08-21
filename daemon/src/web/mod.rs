@@ -54,6 +54,9 @@ pub struct StatusSnapshot {
     /// 切后 BSSID 短锁剩余秒（0=未锁）
     #[serde(default)]
     pub bssid_lock_remaining_secs: u64,
+    /// 守护进程版本号（编译时注入）
+    #[serde(default)]
+    pub version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -128,6 +131,7 @@ impl StatusSnapshot {
             best_5g_rssi: None,
             summary: String::new(),
             bssid_lock_remaining_secs: 0,
+            version: env!("CARGO_PKG_VERSION").into(),
         }
     }
 }

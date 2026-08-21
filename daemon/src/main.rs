@@ -1112,6 +1112,8 @@ fn main() {
     let mut fail_streak_key = String::new();
     let mut fail_streak: u32 = 0;
     let mut fail_backoff_until: Option<Instant> = None;
+    /// 防重复：switch None 日志最多 30s 一条
+    let mut last_no_target_log: Option<Instant> = None;
 
     loop {
         let (
@@ -2076,34 +2078,50 @@ fn main() {
                             snap.power_state = "WEAK_OFF".into();
                         }
                     } else {
-                        let why = match hint {
-                            SwitchHint::Upswitch => match cached_best_5g {
-                                Some(b) => format!(
-                                    "上切未执行：家网 5G 最强 {b} dBm < 上切线 {up_rssi} dBm"
-                                ),
-                                None => format!(
-                                    "上切未执行：未扫到家网 5G（上切线 {up_rssi} dBm）"
-                                ),
-                            },
-                            SwitchHint::Downswitch => {
-                                "下切未执行：未扫到可用 2.4G 家网 AP".into()
-                            }
-                            _ => format!("无可用对端 AP（bonds={}）", bonds.len()),
+                        // 非上切/下切时（None / SameBandRoam 等待中）：不写 last_error，不刷日志
+                        let is_no_target = hint != SwitchHint::Upswitch
+                            && hint != SwitchHint::Downswitch;
+                        let do_log = if is_no_target {
+                            let now = Instant::now();
+                            last_no_target_log.map(|t| now - t >= Duration::from_secs(30)).unwrap_or(true)
+                                .then(|| { last_no_target_log = Some(now); true })
+                                .unwrap_or(false)
+                        } else {
+                            true
                         };
-                        log::info!("switch {:?}: {why}", hint);
-                        if let Ok(mut snap) = snapshot.lock() {
-                            snap.last_error = why.clone();
-                            snap.block_reason = why;
-                            snap.best_5g_rssi = cached_best_5g;
-                            snap.threshold_hint = threshold_hint_zh(
-                                on_preferred,
-                                score,
-                                rssi,
-                                switch_th,
-                                detect_th,
-                                up_rssi,
-                                cached_best_5g,
-                            );
+                        if do_log {
+                            let why = match hint {
+                                SwitchHint::Upswitch => match cached_best_5g {
+                                    Some(b) => format!(
+                                        "上切未执行：家网 5G 最强 {b} dBm < 上切线 {up_rssi} dBm"
+                                    ),
+                                    None => format!(
+                                        "上切未执行：未扫到家网 5G（上切线 {up_rssi} dBm）"
+                                    ),
+                                },
+                                SwitchHint::Downswitch => {
+                                    "下切未执行：未扫到可用 2.4G 家网 AP".into()
+                                }
+                                _ => format!("无可用对端 AP（家网 {home} 个）", home = home_aps.len()),
+                            };
+                            log::info!("switch {:?}: {why}", hint);
+                            if !is_no_target {
+                                // 上切/下切失败才写 last_error
+                                if let Ok(mut snap) = snapshot.lock() {
+                                    snap.last_error = why.clone();
+                                    snap.block_reason = why;
+                                    snap.best_5g_rssi = cached_best_5g;
+                                    snap.threshold_hint = threshold_hint_zh(
+                                        on_preferred,
+                                        score,
+                                        rssi,
+                                        switch_th,
+                                        detect_th,
+                                        up_rssi,
+                                        cached_best_5g,
+                                    );
+                                }
+                            }
                         }
                         sm.finish_switch_ok();
                     }
