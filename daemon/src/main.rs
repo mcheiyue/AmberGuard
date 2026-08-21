@@ -35,9 +35,7 @@ fn load_history() -> VecDeque<SwitchEvent> {
     let Ok(raw) = std::fs::read_to_string(HISTORY_PATH) else {
         return q;
     };
-    let Ok(list) = serde_json::from_str::<Vec<SwitchEvent>>(&raw) else {
-        return q;
-    };
+    let list = web::events_from_json(&raw);
     for ev in list.into_iter().take(HISTORY_CAP) {
         q.push_back(ev);
     }
@@ -45,11 +43,10 @@ fn load_history() -> VecDeque<SwitchEvent> {
 }
 
 fn save_history(hist: &VecDeque<SwitchEvent>) {
-    let list: Vec<&SwitchEvent> = hist.iter().collect();
-    if let Ok(s) = serde_json::to_string(&list) {
-        let _ = std::fs::create_dir_all("/data/adb/amberguard");
-        let _ = std::fs::write(HISTORY_PATH, s);
-    }
+    let list: Vec<SwitchEvent> = hist.iter().cloned().collect();
+    let s = web::events_to_json(&list);
+    let _ = std::fs::create_dir_all("/data/adb/amberguard");
+    let _ = std::fs::write(HISTORY_PATH, s);
 }
 
 /// 运行模式中文
@@ -609,14 +606,17 @@ fn main() {
             let resp = match (method, path) {
                 (Method::Get, "/api/status") => {
                     let s = snapshot_http.lock().unwrap();
-                    let json = serde_json::to_string(&*s).unwrap_or_else(|_| "{}".into());
+                    let json = s.to_json();
                     json_resp(json, StatusCode(200))
                 }
                 (Method::Get, "/api/history") => {
                     let h = history_http.lock().unwrap();
                     let list: Vec<&SwitchEvent> = h.iter().collect();
-                    let body = serde_json::json!({ "ok": true, "events": list });
-                    json_resp(body.to_string(), StatusCode(200))
+                    let evs = web::events_to_json(
+                        &list.iter().map(|e| (*e).clone()).collect::<Vec<_>>()
+                    );
+                    let body = format!(r#"{{"ok":true,"events":{evs}}}"#);
+                    json_resp(body, StatusCode(200))
                 }
                 (Method::Post, "/api/history/clear") | (Method::Get, "/api/history/clear") => {
                     if let Ok(mut h) = history_http.lock() {
@@ -681,10 +681,7 @@ fn main() {
                         steps,
                         block_reason: snap.block_reason.clone(),
                     };
-                    json_resp(
-                        serde_json::to_string(&body).unwrap_or_else(|_| "{}".into()),
-                        StatusCode(200),
-                    )
+                    json_resp(body.to_json(), StatusCode(200))
                 }
                 (Method::Get, "/api/config") => {
                     let c = config_http.lock().unwrap();
@@ -1121,7 +1118,6 @@ fn main() {
             switch_th,
             detect_th,
             up_rssi,
-            bonds,
             home_aps,
             iface,
             mode,
@@ -1144,7 +1140,6 @@ fn main() {
                 c.score_switch_threshold,
                 c.score_detect_threshold,
                 c.upswitch_rssi_min_dbm,
-                c.bonds.clone(),
                 c.home_aps.clone(),
                 c.interface.clone(),
                 c.mode.clone(),
@@ -1611,7 +1606,6 @@ fn main() {
                             &ssid,
                             preferred_is_5g,
                             rssi + 8,
-                            &bonds,
                             &home_aps,
                         )
                         .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid))
@@ -1621,7 +1615,6 @@ fn main() {
                                 &ssid,
                                 !preferred_is_5g,
                                 -80,
-                                &bonds,
                                 &home_aps,
                             )
                         })
@@ -1633,7 +1626,6 @@ fn main() {
                             &ssid,
                             preferred_is_5g,
                             up_rssi,
-                            &bonds,
                             &home_aps,
                         )
                     }
@@ -1646,7 +1638,6 @@ fn main() {
                             &ssid,
                             cur_is_5g,
                             rssi + 5,
-                            &bonds,
                             &home_aps,
                         )
                         .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid));
@@ -1657,7 +1648,6 @@ fn main() {
                                     &ssid,
                                     false,
                                     rssi_disc + 10,
-                                    &bonds,
                                     &home_aps,
                                 )
                                 .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid))
@@ -1676,7 +1666,6 @@ fn main() {
                         &ssid,
                         preferred_is_5g,
                         rssi + roam_margin_db,
-                        &bonds,
                         &home_aps,
                     )
                     .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid));
@@ -2065,9 +2054,8 @@ fn main() {
                 } else {
                     if weak_rescue {
                         log::warn!(
-                            "weak disconnect: no better peer in set (ssid={ssid}, home={}, bonds={})",
-                            home_aps.len(),
-                            bonds.len()
+                            "weak disconnect: no better peer in set (ssid={ssid}, home={})",
+                            home_aps.len()
                         );
                         let _ = wpa.lock().unwrap().command("DISCONNECT");
                         weak_disconnected = true;
@@ -2213,7 +2201,7 @@ fn offline_loop() -> ! {
         thread::spawn(move || {
             for req in server.incoming_requests() {
                 let s = snapshot2.lock().unwrap();
-                let json = serde_json::to_string(&*s).unwrap_or_else(|_| "{}".into());
+                let json = s.to_json();
                 let _ = req.respond(Response::from_string(json));
             }
         });

@@ -1,4 +1,4 @@
-//! 扫描解析 + 双频羁绊（同名 / 配置 / 启发式异名）
+//! 扫描解析 + 家网匹配 + 启发式双频组
 
 use serde::{Deserialize, Serialize};
 
@@ -14,13 +14,6 @@ impl ScanAp {
     pub fn is_5g(&self) -> bool {
         self.freq > 5000
     }
-}
-
-/// 配置的双频对（异名 SSID 必填）
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SsidBond {
-    pub ssid_5g: String,
-    pub ssid_24g: String,
 }
 
 /// 家网 AP（BSSID 主键，通用多路由/Mesh）
@@ -311,33 +304,15 @@ pub fn ssid_stem(ssid: &str) -> String {
     s.trim_matches(|c| c == '_' || c == '-').to_string()
 }
 
-fn ssid_matches(current: &str, candidate: &str, bonds: &[SsidBond]) -> bool {
-    if current == candidate {
-        return true;
-    }
-    for b in bonds {
-        if (current == b.ssid_5g && candidate == b.ssid_24g)
-            || (current == b.ssid_24g && candidate == b.ssid_5g)
-        {
-            return true;
-        }
-    }
-    // 启发式：stem 相同且非空
-    let a = ssid_stem(current);
-    let b = ssid_stem(candidate);
-    !a.is_empty() && a.eq_ignore_ascii_case(&b)
-}
-
 /// 在目标频段上选目标 AP。
-/// 优先级：① 家网组内（BSSID）② bonds/stem 启发式（无家网或家网内无可见目标时）
+/// 优先级：① 家网组内（BSSID）② stem 启发式（无家网时）
 pub fn best_bonded_on_band(
     scans: &[ScanAp],
     current_ssid: &str,
     want_5g: bool,
     min_rssi: i32,
-    bonds: &[SsidBond],
 ) -> Option<ScanAp> {
-    best_on_band(scans, current_ssid, want_5g, min_rssi, bonds, &[])
+    best_on_band(scans, current_ssid, want_5g, min_rssi, &[])
 }
 
 pub fn best_on_band(
@@ -345,7 +320,6 @@ pub fn best_on_band(
     current_ssid: &str,
     want_5g: bool,
     min_rssi: i32,
-    bonds: &[SsidBond],
     home: &[HomeAp],
 ) -> Option<ScanAp> {
     let band_ok = |a: &ScanAp| a.is_5g() == want_5g && a.signal >= min_rssi;
@@ -363,10 +337,15 @@ pub fn best_on_band(
         return None;
     }
 
+    // 无家网：stem 启发式匹配（同名 / 同 stem 异名 SSID）
+    let stem = ssid_stem(current_ssid);
     scans
         .iter()
         .filter(|a| band_ok(a))
-        .filter(|a| ssid_matches(current_ssid, &a.ssid, bonds))
+        .filter(|a| {
+            a.ssid == current_ssid
+                || (!stem.is_empty() && ssid_stem(&a.ssid).eq_ignore_ascii_case(&stem))
+        })
         .max_by_key(|a| a.signal)
         .cloned()
 }

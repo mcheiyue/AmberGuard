@@ -61,8 +61,6 @@ pub struct Config {
     pub score_switch_threshold: f32,
     #[serde(default)]
     pub wpa_ctrl_path: Option<String>,
-    #[serde(default)]
-    pub bonds: Vec<crate::band_bond::SsidBond>,
     /// 家网 AP 列表（BSSID 主键）。非空时自动切换仅在组内进行。
     #[serde(default)]
     pub home_aps: Vec<crate::band_bond::HomeAp>,
@@ -171,7 +169,6 @@ impl Default for Config {
             score_detect_threshold: default_score_detect(),
             score_switch_threshold: default_score_switch(),
             wpa_ctrl_path: None,
-            bonds: Vec::new(),
             home_aps: Vec::new(),
             mode: default_mode(),
             log_level: default_log_level(),
@@ -198,7 +195,6 @@ pub struct ConfigPatch {
     pub upswitch_rssi_min_dbm: Option<i32>,
     pub mode: Option<String>,
     pub log_level: Option<String>,
-    pub bonds: Option<Vec<crate::band_bond::SsidBond>>,
     pub home_aps: Option<Vec<crate::band_bond::HomeAp>>,
     pub interface: Option<String>,
     pub user_hold_secs: Option<u64>,
@@ -398,9 +394,6 @@ impl Config {
                 }
             }
         }
-        if let Some(b) = p.bonds {
-            self.bonds = b;
-        }
         if let Some(homes) = p.home_aps {
             self.home_aps = normalize_home_aps(homes);
         }
@@ -560,7 +553,6 @@ impl Config {
         self.score_detect_threshold = cfg.score_detect_threshold;
         self.score_switch_threshold = cfg.score_switch_threshold;
         self.wpa_ctrl_path = cfg.wpa_ctrl_path;
-        self.bonds = cfg.bonds;
         self.home_aps = normalize_home_aps(cfg.home_aps);
         self.preferred_band = if cfg.preferred_band == "2.4" {
             "2.4".into()

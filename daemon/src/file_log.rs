@@ -180,11 +180,7 @@ pub fn init(level: &str) {
     let file = match FileLogger::open(&path) {
         Ok(f) => Some(f),
         Err(e) => {
-            eprintln!("amberguard: open log failed: {e}; stderr-only via env_logger");
-            let _ = env_logger::Builder::from_env(
-                env_logger::Env::default().default_filter_or(level),
-            )
-            .try_init();
+            eprintln!("amberguard: open log failed: {e}; fallback to stderr");
             return;
         }
     };
@@ -192,7 +188,9 @@ pub fn init(level: &str) {
         path,
         file: Mutex::new(file),
     };
-    if log::set_boxed_logger(Box::new(logger)).is_ok() {
+    // ponytail: log v0.4.33 removed set_boxed_logger; use set_logger with leak
+        let leaked: &'static FileLogger = Box::leak(Box::new(logger));
+        if log::set_logger(leaked).is_ok() {
         log::set_max_level(filter);
     }
 }
