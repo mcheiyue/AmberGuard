@@ -42,6 +42,34 @@ pub struct StatusSnapshot {
     pub bssid_lock_remaining_secs: u64,
     /// 守护进程版本号（编译时注入）
     pub version: String,
+    /// 模块热更新检测结果（None=无更新）
+    pub update_info: Option<UpdateInfo>,
+}
+
+/// 模块热更新检测结果
+#[derive(Debug, Clone)]
+pub struct UpdateInfo {
+    /// 检测到更新（true=模块文件已变化）
+    pub detected: bool,
+    /// 新版本号（从 module.prop 读取）
+    pub new_version: String,
+    /// 需重启手机（sepolicy / post-fs-data / service.sh 变了）
+    pub need_reboot: bool,
+    /// 需重置配置（module.prop 标记 configResetNeeded=true）
+    pub need_config_reset: bool,
+    /// 人话提示
+    pub message: String,
+}
+
+impl UpdateInfo {
+    pub fn to_json(&self) -> String {
+        format!(
+            r#"{{"detected":{},"new_version":"{}","need_reboot":{},"need_config_reset":{},"message":"{}"}}"#,
+            self.detected, json_esc(&self.new_version),
+            self.need_reboot, self.need_config_reset,
+            json_esc(&self.message),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -249,6 +277,7 @@ impl StatusSnapshot {
             summary: String::new(),
             bssid_lock_remaining_secs: 0,
             version: env!("CARGO_PKG_VERSION").into(),
+            update_info: None,
         }
     }
 
@@ -257,7 +286,7 @@ impl StatusSnapshot {
         let th = &self.thresholds;
         // ponytail: manual JSON, ~50% less codegen than serde_json
         format!(
-            r#"{{"rssi":{},"score":{},"band":"{}","state":"{}","ssid":"{}","power_state":"{}","last_error":"{}","thresholds":{{"score_detect_threshold":{},"score_switch_threshold":{},"upswitch_rssi_min_dbm":{},"mode":"{}"}},"hold_remaining_secs":{},"hold_kind":"{}","user_hold_secs":{},"link_ctrl":"{}","home_ap_count":{},"in_home":{},"block_reason":"{}","penalty_remaining_secs":{},"screen":"{}","l3_last":"{}","bssid":"{}","threshold_hint":"{}","best_5g_rssi":{},"summary":"{}","bssid_lock_remaining_secs":{},"version":"{}"}}"#,
+            r#"{{"rssi":{},"score":{},"band":"{}","state":"{}","ssid":"{}","power_state":"{}","last_error":"{}","thresholds":{{"score_detect_threshold":{},"score_switch_threshold":{},"upswitch_rssi_min_dbm":{},"mode":"{}"}},"hold_remaining_secs":{},"hold_kind":"{}","user_hold_secs":{},"link_ctrl":"{}","home_ap_count":{},"in_home":{},"block_reason":"{}","penalty_remaining_secs":{},"screen":"{}","l3_last":"{}","bssid":"{}","threshold_hint":"{}","best_5g_rssi":{},"summary":"{}","bssid_lock_remaining_secs":{},"version":"{}","update_info":{}}}"#,
             self.rssi, self.score, json_esc(&self.band), json_esc(&self.state),
             json_esc(&self.ssid), json_esc(&self.power_state), json_esc(&self.last_error),
             th.score_detect_threshold, th.score_switch_threshold, th.upswitch_rssi_min_dbm,
@@ -269,6 +298,10 @@ impl StatusSnapshot {
             json_esc(&self.threshold_hint),
             match self.best_5g_rssi { Some(v) => v.to_string(), None => "null".into() },
             json_esc(&self.summary), self.bssid_lock_remaining_secs, json_esc(&self.version),
+            match &self.update_info {
+                Some(u) => u.to_json(),
+                None => "null".into(),
+            },
         )
     }
 }

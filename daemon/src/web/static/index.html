@@ -178,6 +178,15 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
   </header>
 
   <main>
+    <div class="banner" id="updateBanner" style="display:none">
+      <div>
+        <strong id="updateTitle">模块更新</strong>
+        <div class="note" style="margin:2px 0 0" id="updateText"></div>
+      </div>
+      <div class="btns">
+        <button class="primary" type="button" onclick="resetConfig()" id="btnResetCfg" style="display:none">重置配置</button>
+      </div>
+    </div>
     <div class="banner" id="holdBanner">
       <div>
         <strong id="holdTitle">保护中</strong>
@@ -656,6 +665,16 @@ function l3LastZh(s) {
   if (s.startsWith('net')) return '网络不可达（' + s.slice(4) + '）';
   if (s.startsWith('warn:')) return '连通告警（' + s.slice(5) + '）';
   return s;
+}
+
+async function resetConfig() {
+  if (!confirm('重置配置为默认？当前阈值与家网设置将被清除。')) return;
+  try {
+    await fetch('/api/config/reset', { method: 'POST', cache: 'no-store' });
+    const ub = $('updateBanner');
+    if (ub) ub.style.display = 'none';
+    loadConfig(); tick();
+  } catch (e) { if ($('err')) $('err').textContent = e.message; }
 }
 
 async function clearHistory() {
@@ -1279,6 +1298,22 @@ async function tick() {
       const l3z = l3LastZh(j.l3_last || '');
       const base = j.threshold_hint || '';
       thh.textContent = base + (l3z ? ((base ? ' · ' : '') + 'L3：' + l3z) : '');
+    }
+    // 模块热更新提示
+    const ub = $('updateBanner');
+    if (ub) {
+      const ui = j.update_info;
+      if (ui && ui.detected) {
+        ub.style.display = 'flex';
+        const needReboot = !!ui.need_reboot;
+        const needReset = !!ui.need_config_reset;
+        if ($('updateTitle')) $('updateTitle').textContent = needReboot ? '模块已更新 · 需重启' : '模块已更新';
+        $('updateText').textContent = ui.message || '';
+        const rb = $('btnResetCfg');
+        if (rb) rb.style.display = needReset ? '' : 'none';
+      } else {
+        ub.style.display = 'none';
+      }
     }
     const holdRem = j.hold_remaining_secs || 0;
     const holdKind = j.hold_kind || '';

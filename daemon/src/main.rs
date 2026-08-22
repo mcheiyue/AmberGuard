@@ -288,6 +288,73 @@ fn module_prop_path() -> Option<std::path::PathBuf> {
     }
 }
 
+/// 模块目录路径
+fn module_dir() -> Option<std::path::PathBuf> {
+    let exe = std::fs::read_link("/proc/self/exe").ok()?;
+    exe.parent()?.parent().map(|p| p.to_path_buf())
+}
+
+/// 记录启动时关键文件的 mtime（用于热更新检测）
+struct ModuleFileMtimes {
+    binary: Option<std::time::SystemTime>,
+    sepolicy: Option<std::time::SystemTime>,
+    post_fs_data: Option<std::time::SystemTime>,
+    service_sh: Option<std::time::SystemTime>,
+}
+
+fn record_module_mtimes() -> ModuleFileMtimes {
+    let dir = module_dir().unwrap_or_else(|| std::path::PathBuf::from("/data/adb/modules/AmberGuard"));
+    let mtime = |name: &str| std::fs::metadata(dir.join(name))
+        .ok()
+        .and_then(|m| m.modified().ok());
+    ModuleFileMtimes {
+        binary: std::fs::metadata("/proc/self/exe").ok().and_then(|m| m.modified().ok()),
+        sepolicy: mtime("sepolicy.rule"),
+        post_fs_data: mtime("post-fs-data.sh"),
+        service_sh: mtime("service.sh"),
+    }
+}
+
+/// 检查 bin/amberguard 的 mtime 是否变化（模块被更新）
+fn binary_changed(start: &ModuleFileMtimes) -> bool {
+    let cur = std::fs::metadata("/proc/self/exe")
+        .ok()
+        .and_then(|m| m.modified().ok());
+    match (start.binary, cur) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    }
+}
+
+/// 检查需重启的文件是否变化
+fn reboot_files_changed(start: &ModuleFileMtimes) -> bool {
+    let dir = module_dir().unwrap_or_else(|| std::path::PathBuf::from("/data/adb/modules/AmberGuard"));
+    let mtime = |name: &str| std::fs::metadata(dir.join(name))
+        .ok()
+        .and_then(|m| m.modified().ok());
+    let sep = mtime("sepolicy.rule");
+    let pfs = mtime("post-fs-data.sh");
+    let svc = mtime("service.sh");
+    sep != start.sepolicy || pfs != start.post_fs_data || svc != start.service_sh
+}
+
+/// 从 module.prop 读取版本号和 configResetNeeded 标记
+fn read_module_prop() -> (String, bool) {
+    let path = module_prop_path().unwrap_or_else(|| std::path::PathBuf::from("/data/adb/modules/AmberGuard/module.prop"));
+    let raw = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut version = String::new();
+    let mut reset_needed = false;
+    for line in raw.lines() {
+        if let Some(v) = line.strip_prefix("version=") {
+            version = v.trim().to_string();
+        }
+        if line.contains("configResetNeeded=true") || line.contains("configResetNeeded=1") {
+            reset_needed = true;
+        }
+    }
+    (version, reset_needed)
+}
+
 fn push_history(hist: &Arc<Mutex<VecDeque<SwitchEvent>>>, ev: SwitchEvent) {
     if let Ok(mut h) = hist.lock() {
         h.push_front(ev);
@@ -549,6 +616,8 @@ fn read_body(req: &mut tiny_http::Request) -> String {
 }
 
 fn main() {
+    // 重启后模块文件已生效，清除上一轮热更新提示
+    let _ = std::fs::remove_file("/data/adb/amberguard/update.txt");
     let config = Arc::new(Mutex::new(Config::load().expect("config load")));
     {
         let c = config.lock().unwrap();
@@ -982,6 +1051,36 @@ fn main() {
                         ),
                     }
                 }
+                (Method::Post, "/api/config/reset") => {
+                    // 热更新后配置重置：备份 → 删 config.toml → 回内存默认
+                    let path = std::path::PathBuf::from("/data/adb/amberguard/config.toml");
+                    if path.is_file() {
+                        let ts = unix_now();
+                        let bak = format!(
+                            "/data/adb/amberguard/config.toml.bak.{ts}"
+                        );
+                        let _ = std::fs::copy(&path, &bak);
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    if let Ok(mut c) = config_http.lock() {
+                        *c = Config::default();
+                        let _ = c.save();
+                        file_log::set_level(&c.log_level);
+                        if let Ok(mut s) = snapshot_http.lock() {
+                            s.thresholds = ThresholdsView {
+                                score_detect_threshold: c.score_detect_threshold,
+                                score_switch_threshold: c.score_switch_threshold,
+                                upswitch_rssi_min_dbm: c.upswitch_rssi_min_dbm,
+                                mode: c.mode.clone(),
+                            };
+                            s.user_hold_secs = c.user_hold_secs;
+                            s.update_info = None;
+                        }
+                    }
+                    let _ = std::fs::remove_file("/data/adb/amberguard/update.txt");
+                    log::info!("config reset via API (hot update)");
+                    json_resp(r#"{"ok":true,"reset":true}"#.into(), StatusCode(200))
+                }
                 (Method::Get, "/api/logs") => {
                     // ?lines=200
                     let lines = url
@@ -1112,6 +1211,10 @@ fn main() {
     /// 防重复：switch None 日志最多 30s 一条
     let mut last_no_target_log: Option<Instant> = None;
 
+    /// 模块热更新检测：启动时记录关键文件 mtime
+    let start_mtimes = record_module_mtimes();
+    let mut last_mtime_check = Instant::now();
+
     loop {
         let (
             paused,
@@ -1162,6 +1265,42 @@ fn main() {
             sm.apply_eco(eco);
             last_eco = eco;
             log::info!("mode debounce: eco={eco}");
+        }
+
+        // —— 模块热更新检测（每 5s 一次 stat，零开销）——
+        if last_mtime_check.elapsed() >= Duration::from_secs(5) {
+            last_mtime_check = Instant::now();
+            if binary_changed(&start_mtimes) {
+                let (new_ver, reset_flag) = read_module_prop();
+                let need_reboot = reboot_files_changed(&start_mtimes);
+                let msg = if need_reboot && reset_flag {
+                    format!("模块已更新到 {new_ver}：需重启手机生效，且本次更新需重置配置")
+                } else if need_reboot {
+                    format!("模块已更新到 {new_ver}：需重启手机才能完整生效")
+                } else if reset_flag {
+                    format!("模块已更新到 {new_ver}：本次更新需重置配置")
+                } else {
+                    format!("模块已更新到 {new_ver}，正在自动重启…")
+                };
+                log::info!("hot update detected: ver={new_ver} need_reboot={need_reboot} reset={reset_flag}");
+                let info = crate::web::UpdateInfo {
+                    detected: true,
+                    new_version: new_ver,
+                    need_reboot,
+                    need_config_reset: reset_flag,
+                    message: msg.clone(),
+                };
+                if let Ok(mut s) = snapshot.lock() {
+                    s.update_info = Some(info);
+                    s.summary = msg.clone();
+                }
+                // 可热更新 → 退出让 service.sh 重拉新二进制；需重启/重置则留在旧进程提示用户
+                if !need_reboot && !reset_flag {
+                    write_status_txt("AmberGuard · 模块已更新 · 自动重启中");
+                    std::process::exit(0);
+                }
+                let _ = std::fs::write("/data/adb/amberguard/update.txt", &msg);
+            }
         }
 
         let screen = power.current_state();

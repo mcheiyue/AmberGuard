@@ -29,6 +29,11 @@ else
   echo "配置：未保存（请打开面板初始化）"
 fi
 
+if [ -f "$AG/update.txt" ]; then
+  UMSG=$(cat "$AG/update.txt" 2>/dev/null | tr -d '\r' | head -n 1)
+  [ -n "$UMSG" ] && echo "更新：$UMSG"
+fi
+
 echo "面板：http://127.0.0.1:8080/"
 echo "日志：$AG/log/amberguard.log"
 echo "仓库：https://github.com/mcheiyue/AmberGuard"
