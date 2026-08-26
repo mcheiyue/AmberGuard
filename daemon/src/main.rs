@@ -588,6 +588,7 @@ mod band_bond;
 mod config;
 mod file_log;
 mod health_score;
+mod notify;
 mod power_state;
 mod scanner;
 mod state_machine;
@@ -1081,6 +1082,43 @@ fn main() {
                     log::info!("config reset via API (hot update)");
                     json_resp(r#"{"ok":true,"reset":true}"#.into(), StatusCode(200))
                 }
+                (Method::Post, "/api/notify/test") => {
+                    notify::test();
+                    json_resp(r#"{"ok":true}"#.into(), StatusCode(200))
+                }
+                (Method::Post, "/api/connect") => {
+                    let body = read_body(&mut req);
+                    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                    let ssid = parsed.get("ssid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let bssid = parsed.get("bssid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if ssid.is_empty() {
+                        json_resp(r#"{"ok":false,"error":"ssid is required"}"#.into(), StatusCode(400))
+                    } else {
+                        let bssid_arg = if bssid.is_empty() { None } else { Some(bssid.as_str()) };
+                        match wifi_framework::framework_connect(&ssid, bssid_arg) {
+                            Ok(()) => {
+                                log::info!("api connect: ssid={ssid} bssid={bssid}");
+                                let hold_secs = { config_http.lock().unwrap().user_hold_secs };
+                                if hold_secs > 0 {
+                                    *hold_http.lock().unwrap() = Some(HoldState {
+                                        until: Instant::now() + Duration::from_secs(hold_secs),
+                                        kind: HoldKind::Manual,
+                                    });
+                                }
+                                json_resp(
+                                    format!(r#"{{"ok":true,"ssid":"{ssid}","bssid":"{bssid}"}}"#),
+                                    StatusCode(200),
+                                )
+                            }
+                            Err(e) => {
+                                json_resp(
+                                    format!(r#"{{"ok":false,"error":"{e}"}}"#),
+                                    StatusCode(500),
+                                )
+                            }
+                        }
+                    }
+                }
                 (Method::Get, "/api/logs") => {
                     // ?lines=200
                     let lines = url
@@ -1210,6 +1248,12 @@ fn main() {
     let mut fail_backoff_until: Option<Instant> = None;
     /// 防重复：switch None 日志最多 30s 一条
     let mut last_no_target_log: Option<Instant> = None;
+    let mut last_no_target_reason: String = String::new();
+
+    /// wpa 连续失败退避（避免 WiFi 关闭时每秒刷屏重试）
+    let mut wpa_fail_streak: u32 = 0;
+    let mut last_wpa_reconnect: Option<Instant> = None;
+    let mut last_wpa_fail_log: Option<Instant> = None;
 
     /// 模块热更新检测：启动时记录关键文件 mtime
     let start_mtimes = record_module_mtimes();
@@ -1236,6 +1280,10 @@ fn main() {
             roam_enable,
             roam_margin_db,
             roam_hold_secs,
+            notify_enable,
+            notify_switch,
+            notify_weak,
+            notify_ongoing_secs,
         ) = {
             let c = config.lock().unwrap();
             (
@@ -1258,6 +1306,10 @@ fn main() {
                 c.roam_enable,
                 c.roam_margin_db,
                 c.roam_hold_secs,
+                c.notify_enable,
+                c.notify_switch,
+                c.notify_weak,
+                c.notify_ongoing_secs,
             )
         };
 
@@ -1382,8 +1434,13 @@ fn main() {
             );
 
             // 检测用户手动切网（非 daemon 发起）
+            // 同 SSID 换 BSSID = 框架 802.11k/v 漫游，不算手切
+            let prev_ssid = prev_link_key.split('|').next().unwrap_or("");
+            let ssid_changed = !prev_ssid.is_empty()
+                && ssid_now.to_lowercase() != prev_ssid;
             if !prev_link_key.is_empty()
                 && link_key != prev_link_key
+                && ssid_changed
                 && st.wpa_state == "COMPLETED"
                 && !ssid_now.is_empty()
             {
@@ -2112,6 +2169,10 @@ fn main() {
                                     }
                                 }
                                 log::info!("switch OK -> {} ({})", peer.ssid, result);
+                                last_no_target_reason.clear();
+                                if notify_enable && notify_switch {
+                                    notify::event("AmberGuard", &format!("已切到 {}（{result}）", peer.ssid));
+                                }
                             } else {
                                 if fail_streak_key == bond_key {
                                     fail_streak = fail_streak.saturating_add(1);
@@ -2145,6 +2206,9 @@ fn main() {
                                         snap.last_error =
                                             format!("弱信号已断开（切换失败，{rssi} dBm）");
                                         snap.power_state = "WEAK_OFF".into();
+                                    }
+                                    if notify_enable && notify_weak {
+                                        notify::event("AmberGuard", &format!("弱信号断开（{rssi} dBm，切换救援失败）"));
                                     }
                                 }
                             }
@@ -2187,6 +2251,9 @@ fn main() {
                                         format!("弱信号已断开（无可用网络，{rssi} dBm）");
                                     snap.power_state = "WEAK_OFF".into();
                                 }
+                                if notify_enable && notify_weak {
+                                    notify::event("AmberGuard", &format!("弱信号断开（{rssi} dBm，无可用网络）"));
+                                }
                             }
                         }
                     }
@@ -2205,14 +2272,18 @@ fn main() {
                             snap.power_state = "WEAK_OFF".into();
                         }
                     } else {
-                        // 非上切/下切时（None / SameBandRoam 等待中）：不写 last_error，不刷日志
+                        // 非上切/下切时（None / SameBandRoam 等待中）：不写 last_error
                         let is_no_target = hint != SwitchHint::Upswitch
                             && hint != SwitchHint::Downswitch;
                         let do_log = if is_no_target {
-                            let now = Instant::now();
-                            last_no_target_log.map(|t| now - t >= Duration::from_secs(30)).unwrap_or(true)
-                                .then(|| { last_no_target_log = Some(now); true })
-                                .unwrap_or(false)
+                            // 只在原因变化时打 1 条，不再每 30s 重复
+                            let why_preview = format!("无可用对端 AP（家网 {home} 个）", home = home_aps.len());
+                            if why_preview != last_no_target_reason {
+                                last_no_target_reason = why_preview;
+                                true
+                            } else {
+                                false
+                            }
                         } else {
                             true
                         };
@@ -2256,7 +2327,15 @@ fn main() {
             }
         } else {
             // wpa STATUS 失败：仍必须刷新 hold/息屏文案，否则会永远卡在「保护中 30s」
-            log::warn!("wpa status failed — refresh snapshot + try reconnect");
+            wpa_fail_streak = wpa_fail_streak.saturating_add(1);
+            let now = Instant::now();
+            let log_this = last_wpa_fail_log
+                .map(|t| now.duration_since(t).as_secs() >= 30)
+                .unwrap_or(true);
+            if log_this {
+                log::warn!("wpa status failed (streak={wpa_fail_streak}) — refresh snapshot + try reconnect");
+                last_wpa_fail_log = Some(now);
+            }
             {
                 let mut s = snapshot.lock().unwrap();
                 s.hold_remaining_secs = hold_rem;
@@ -2305,27 +2384,52 @@ fn main() {
                 write_status_txt(&line);
                 update_module_description(&line);
             }
-            // 僵尸 ctrl socket：重连 wpa（不阻塞太久）
-            match WpaCtrl::auto_connect() {
-                Ok(w) => {
-                    log::info!("wpa reconnected after status failure");
-                    if let Ok(mut g) = wpa.lock() {
-                        *g = w;
+            // 僵尸 ctrl socket：重连 wpa（连续失败时退避到 15s，不每秒刷屏）
+            let should_reconnect = last_wpa_reconnect
+                .map(|t| now.duration_since(t).as_secs() >= 15)
+                .unwrap_or(true);
+            if should_reconnect {
+                last_wpa_reconnect = Some(now);
+                match WpaCtrl::auto_connect() {
+                    Ok(w) => {
+                        log::info!("wpa reconnected after {} failures", wpa_fail_streak);
+                        wpa_fail_streak = 0;
+                        if let Ok(mut g) = wpa.lock() {
+                            *g = w;
+                        }
+                        if let Ok(mut s) = snapshot.lock() {
+                            s.link_ctrl = "ok".into();
+                        }
                     }
-                    if let Ok(mut s) = snapshot.lock() {
-                        s.link_ctrl = "ok".into();
-                    }
-                }
-                Err(e) => {
-                    log::warn!("wpa reconnect failed: {e}");
-                    if let Ok(mut s) = snapshot.lock() {
-                        s.link_ctrl = "fail".into();
-                        if s.block_reason.is_empty() || s.block_reason.contains("重连") {
-                            s.block_reason = format!("链路控制重连失败：{e}");
+                    Err(e) => {
+                        log::warn!("wpa reconnect failed (streak={wpa_fail_streak}): {e}");
+                        if let Ok(mut s) = snapshot.lock() {
+                            s.link_ctrl = "fail".into();
+                            if s.block_reason.is_empty() || s.block_reason.contains("重连") {
+                                s.block_reason = format!("链路控制重连失败：{e}");
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // 常驻状态条（亮屏时更新，息屏时清掉省电）
+        if notify_enable && notify_ongoing_secs > 0 {
+            if screen_off {
+                notify::cancel_ongoing();
+            } else if let Ok(s) = snapshot.lock() {
+                let text = if !s.summary.is_empty() {
+                    s.summary.clone()
+                } else if s.state == "COMPLETED" {
+                    format!("{} · {}dBm · 分{}", s.ssid, s.rssi, s.score as i32)
+                } else {
+                    "未连接".into()
+                };
+                notify::ongoing(&text, notify_ongoing_secs);
+            }
+        } else {
+            notify::cancel_ongoing();
         }
 
         thread::sleep(Duration::from_secs(1));

@@ -315,7 +315,7 @@ mod platform {
             b_is_wlan.cmp(&a_is_wlan)
                 .then_with(|| a.cmp(b))
         });
-        log::info!("wpa_ctrl: discover candidates: {candidates:?}");
+        log::debug!("wpa_ctrl: discover candidates: {candidates:?}");
         candidates
     }
 }
@@ -369,7 +369,7 @@ pub struct WpaCtrl {
 impl WpaCtrl {
     pub fn auto_connect() -> Result<Self, WpaError> {
         let candidates = platform::discover();
-        log::info!("wpa_ctrl: probing {} candidates", candidates.len());
+        log::debug!("wpa_ctrl: probing {} candidates", candidates.len());
         let mut last_err = WpaError::NotConnected;
         for path in &candidates {
             let mut wpa = WpaCtrl {
@@ -396,7 +396,7 @@ impl WpaCtrl {
                     }
                 }
                 Err(e) => {
-                    log::info!("wpa_ctrl: {path} failed: {e}");
+                    log::debug!("wpa_ctrl: {path} failed: {e}");
                     last_err = e;
                 }
             }

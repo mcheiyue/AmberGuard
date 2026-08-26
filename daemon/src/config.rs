@@ -103,6 +103,18 @@ pub struct Config {
     /// 更好 AP 需持续可见秒数。默认 6。
     #[serde(default = "default_roam_hold")]
     pub roam_hold_secs: u64,
+    /// 通知总开关。false 时全部不发。默认 true。
+    #[serde(default = "default_notify_enable")]
+    pub notify_enable: bool,
+    /// 切换成功/失败时发事件通知。默认 true。
+    #[serde(default = "default_notify_switch")]
+    pub notify_switch: bool,
+    /// 弱信号断开时发通知。默认 false。
+    #[serde(default = "default_notify_weak")]
+    pub notify_weak: bool,
+    /// 常驻状态条更新间隔秒。0=关。默认 0。
+    #[serde(default)]
+    pub notify_ongoing_secs: u64,
 }
 
 fn default_interface() -> String {
@@ -159,6 +171,15 @@ fn default_roam_margin() -> i32 {
 fn default_roam_hold() -> u64 {
     6
 }
+fn default_notify_enable() -> bool {
+    true
+}
+fn default_notify_switch() -> bool {
+    true
+}
+fn default_notify_weak() -> bool {
+    false
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -183,6 +204,10 @@ impl Default for Config {
             roam_enable: default_roam_enable(),
             roam_margin_db: default_roam_margin(),
             roam_hold_secs: default_roam_hold(),
+            notify_enable: default_notify_enable(),
+            notify_switch: default_notify_switch(),
+            notify_weak: default_notify_weak(),
+            notify_ongoing_secs: 0,
         }
     }
 }
@@ -208,6 +233,10 @@ pub struct ConfigPatch {
     pub roam_enable: Option<bool>,
     pub roam_margin_db: Option<i32>,
     pub roam_hold_secs: Option<u64>,
+    pub notify_enable: Option<bool>,
+    pub notify_switch: Option<bool>,
+    pub notify_weak: Option<bool>,
+    pub notify_ongoing_secs: Option<u64>,
 }
 
 /// 字段说明（给面板引导用）

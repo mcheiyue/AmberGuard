@@ -136,6 +136,12 @@ button:disabled{opacity:.45}
 [data-theme="light"] .logbox{background:#1a1d24;color:#d0d6e0}
 .setting-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}
 .setting-row:last-child{border-bottom:0}
+.switch{position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0}
+.switch input{opacity:0;width:0;height:0}
+.slider{position:absolute;cursor:pointer;inset:0;background:var(--line);border-radius:24px;transition:.3s}
+.slider:before{content:"";position:absolute;height:18px;width:18px;left:3px;bottom:3px;background:var(--muted);border-radius:50%;transition:.3s}
+.switch input:checked+.slider{background:var(--amber)}
+.switch input:checked+.slider:before{transform:translateX(20px);background:#fff}
 select,input[type=text]{
   background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit
 }
@@ -340,6 +346,29 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         <div class="btns" id="prefBandBtns">
           <button type="button" data-pref="5" class="primary" onclick="setPrefBand('5')">优先 5G</button>
           <button type="button" data-pref="2.4" onclick="setPrefBand('2.4')">优先 2.4G</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>通知</h2>
+        <p class="note detail" style="margin-top:0">切换/弱信号/错误时发系统通知；常驻状态条显示当前链路。</p>
+        <div class="setting-row">
+          <div><div>通知总开关</div><div class="note detail" style="margin:0">关闭后所有通知不发</div></div>
+          <label class="switch"><input type="checkbox" id="notifyEnable" onchange="saveNotify()"><span class="slider"></span></label>
+        </div>
+        <div class="setting-row">
+          <div><div>切换通知</div><div class="note detail" style="margin:0">切换成功/失败时发</div></div>
+          <label class="switch"><input type="checkbox" id="notifySwitch" onchange="saveNotify()"><span class="slider"></span></label>
+        </div>
+        <div class="setting-row">
+          <div><div>弱信号通知</div><div class="note detail" style="margin:0">弱信号断开时发</div></div>
+          <label class="switch"><input type="checkbox" id="notifyWeak" onchange="saveNotify()"><span class="slider"></span></label>
+        </div>
+        <div class="setting-row">
+          <div><div>常驻状态条间隔</div><div class="note detail" style="margin:0">秒，0=关闭。建议 30-60</div></div>
+          <input type="number" id="notifyOngoing" min="0" max="300" style="width:80px" onchange="saveNotify()">
+        </div>
+        <div class="btns" style="margin-top:8px">
+          <button type="button" onclick="testNotify()">测试通知</button>
         </div>
       </div>
       <div class="card">
@@ -677,6 +706,28 @@ async function resetConfig() {
   } catch (e) { if ($('err')) $('err').textContent = e.message; }
 }
 
+async function connectAp(ssid, bssid) {
+  if (!confirm('连接到 ' + ssid + ' (' + bssid + ')？')) return;
+  try {
+    const r = await fetch('/api/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ssid, bssid }),
+      cache: 'no-store'
+    });
+    const j = await r.json();
+    if (j.ok) { alert('已发送连接命令：' + ssid); tick(); }
+    else { alert('连接失败：' + (j.error || '未知错误')); }
+  } catch (e) { alert('连接请求失败：' + e.message); }
+}
+
+async function testNotify() {
+  try {
+    await fetch('/api/notify/test', { method: 'POST', cache: 'no-store' });
+    alert('通知已发送，请查看通知栏');
+  } catch (e) { alert('发送失败：' + e.message); }
+}
+
 async function clearHistory() {
   try {
     await fetch('/api/history/clear', { method: 'POST', cache: 'no-store' });
@@ -946,6 +997,10 @@ function syncSettingsForm() {
     $('weakHoldVal').textContent = c.weak_hold_secs;
   }
   if ($('autoRec')) $('autoRec').value = c.auto_reconnect === false ? 'false' : 'true';
+  if ($('notifyEnable')) $('notifyEnable').checked = c.notify_enable !== false;
+  if ($('notifySwitch')) $('notifySwitch').checked = c.notify_switch !== false;
+  if ($('notifyWeak')) $('notifyWeak').checked = c.notify_weak === true;
+  if ($('notifyOngoing')) $('notifyOngoing').value = c.notify_ongoing_secs || 0;
   homeSelected = {};
   (c.home_aps || []).forEach(h => {
     if (h.bssid) homeSelected[h.bssid.toLowerCase()] = { bssid: h.bssid, ssid: h.ssid || '', band: h.band || 'auto' };
@@ -976,6 +1031,30 @@ async function saveLogLevel() {
     if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
     if (j.config) cfgCache = j;
     $('setMsg').textContent = '日志级别已更新为 ' + $('logLevel').value;
+  } catch (e) {
+    $('setMsg').textContent = '';
+    $('setErr').textContent = e.message;
+  }
+}
+
+async function saveNotify() {
+  $('setErr').textContent = '';
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        notify_enable: $('notifyEnable').checked,
+        notify_switch: $('notifySwitch').checked,
+        notify_weak: $('notifyWeak').checked,
+        notify_ongoing_secs: parseInt($('notifyOngoing').value) || 0,
+      }),
+      cache: 'no-store'
+    });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    if (j.config) cfgCache = j;
+    $('setMsg').textContent = '通知设置已保存';
   } catch (e) {
     $('setMsg').textContent = '';
     $('setErr').textContent = e.message;
@@ -1016,12 +1095,18 @@ async function scanAps() {
         '<div style="font-weight:600;word-break:break-all">' + escHtml(a.ssid || '(隐藏)') + ' · ' + bandLabel(a.band) +
         (sug ? ' <span style="color:var(--amber);font-weight:500">双频组</span>' : '') + '</div>' +
         '<div style="color:var(--muted);font-family:var(--mono);font-size:11px">' + a.bssid + ' · ' + a.signal + ' dBm</div>' +
-        '</div>';
+        '</div>' +
+        '<button type="button" class="primary" style="flex-shrink:0;padding:4px 10px;font-size:12px" data-connect-ssid="' + escHtml(a.ssid || '') + '" data-connect-bssid="' + a.bssid + '">连接</button>';
       const cb = row.querySelector('input');
       cb.addEventListener('change', () => {
         if (cb.checked) homeSelected[key] = { bssid: a.bssid, ssid: a.ssid || '', band: a.band || 'auto' };
         else delete homeSelected[key];
         updateHomeSummary();
+      });
+      const connectBtn = row.querySelector('[data-connect-ssid]');
+      if (connectBtn) connectBtn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        connectAp(a.ssid || '', a.bssid);
       });
       items.appendChild(row);
     }
