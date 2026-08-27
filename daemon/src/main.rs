@@ -1352,6 +1352,8 @@ fn main() {
                     std::process::exit(0);
                 }
                 let _ = std::fs::write("/data/adb/amberguard/update.txt", &msg);
+                // 需重启/需重置：发系统通知，不开面板也能看到
+                notify::event("AmberGuard 已更新", &msg);
             }
         }
 

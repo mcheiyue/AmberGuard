@@ -1,6 +1,6 @@
 [package]
 name = "amberguard"
-version = "0.5.18"
+version = "0.5.19"
 edition = "2021"
 description = "AmberGuard WiFi dual-band smart switch daemon"
 license = "MIT"
