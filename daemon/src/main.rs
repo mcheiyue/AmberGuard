@@ -1256,7 +1256,7 @@ fn main() {
     let mut last_wpa_fail_log: Option<Instant> = None;
 
     /// 模块热更新检测：启动时记录关键文件 mtime
-    let start_mtimes = record_module_mtimes();
+    let mut start_mtimes = record_module_mtimes();
     let mut last_mtime_check = Instant::now();
 
     loop {
@@ -1337,7 +1337,7 @@ fn main() {
                 log::info!("hot update detected: ver={new_ver} need_reboot={need_reboot} reset={reset_flag}");
                 let info = crate::web::UpdateInfo {
                     detected: true,
-                    new_version: new_ver,
+                    new_version: new_ver.clone(),
                     need_reboot,
                     need_config_reset: reset_flag,
                     message: msg.clone(),
@@ -1349,11 +1349,16 @@ fn main() {
                 // 可热更新 → 退出让 service.sh 重拉新二进制；需重启/重置则留在旧进程提示用户
                 if !need_reboot && !reset_flag {
                     write_status_txt("AmberGuard · 模块已更新 · 自动重启中");
+                    notify::event("AmberGuard 已热更新", &format!("已自动切换到 {new_ver}"));
                     std::process::exit(0);
                 }
                 let _ = std::fs::write("/data/adb/amberguard/update.txt", &msg);
                 // 需重启/需重置：发系统通知，不开面板也能看到
                 notify::event("AmberGuard 已更新", &msg);
+                // 首检后刷新 binary 基线，止住每 5s 重复触发（Branch B 防通知堆叠）
+                start_mtimes.binary = std::fs::metadata("/proc/self/exe")
+                    .ok()
+                    .and_then(|m| m.modified().ok());
             }
         }
 

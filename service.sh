@@ -57,7 +57,12 @@ wait_boot() {
     echo "start $DAEMON crash=$crash"
     setsid "$DAEMON" >>"$LOG" 2>&1
     rc=$?
-    crash=$((crash + 1))
+    # 只有真正崩溃（rc!=0）才计入；热更新 exit(0) 属正常退出，清零避免累计到上限后停拉起
+    if [ $rc -ne 0 ]; then
+        crash=$((crash + 1))
+    else
+        crash=0
+    fi
     echo "exit rc=$rc ($crash/$MAX_CRASH)"
     if [ $crash -ge $MAX_CRASH ]; then
       echo "crash limit, stop"
