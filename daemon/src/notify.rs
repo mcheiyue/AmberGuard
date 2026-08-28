@@ -1,12 +1,15 @@
 //! Android 通知模块
-//! - event: `cmd notification post` 一次性通知（切换/弱信号/错误）
-//! - ongoing: 常驻状态条，周期更新（亮屏时）
-//! - 检测 `cmd` 可用性，不可用则静默跳过
+//! - event / ongoing 用 `cmd notification post`
+//! - 必须以 shell(uid 2000) 身份发：MIUI/HyperOS 在 framework 层静默丢弃 root(uid 0) 发的通知
+//! - 参考 GGAT_10007 模块：setuid(2000) + cmd notification post 在 MIUI 上成功弹通知
 
 use std::process::Command;
 use std::time::Instant;
 
-/// 通知渠道 ID（Android 自动建渠）
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+/// 通知渠道 ID（Android 8+ 要求；MIUI 无渠道会静默丢弃）
 const CHANNEL: &str = "amberguard";
 /// 常驻通知 ID（固定，重复 post 即更新）
 const ONGOING_ID: &str = "amber_ongoing";
@@ -31,13 +34,27 @@ fn cmd_available() -> bool {
     }
 }
 
+/// 以 shell(uid 2000) 身份构造 cmd 进程。
+/// MIUI/HyperOS 会静默丢弃 root(uid 0) 发出的通知，降到 shell 才放行。
+/// 参考：GGAT_10007 模块用 setuid(2000) + cmd notification post 在 MIUI 上成功弹通知。
+fn notify_cmd() -> Command {
+    let mut c = Command::new("/system/bin/cmd");
+    #[cfg(unix)]
+    c.uid(2000);
+    c
+}
+
 /// 递增的事件通知序号（保证 ID 唯一）
 static mut EV_SEQ: u64 = 0;
 
-/// 确保通知渠道存在（Android 8+ 要求；MIUI 无渠道会静默丢弃）
-fn ensure_channel() {
-    let _ = Command::new("/system/bin/cmd")
-        .args(["notification", "create-channel", CHANNEL, "AmberGuard", "4"])
+/// 放行通知助手（MIUI/HyperOS 需要，否则部分 ROM 不显示 cmd 发的通知）
+fn allow_assistant() {
+    let _ = notify_cmd()
+        .args([
+            "notification",
+            "allow_assistant",
+            "com.google.android.ext.services/android.ext.services.notification.Assistant",
+        ])
         .output();
 }
 
@@ -46,13 +63,27 @@ pub fn event(title: &str, text: &str) {
     if !cmd_available() {
         return;
     }
-    ensure_channel();
+    allow_assistant();
     let id = unsafe {
         EV_SEQ += 1;
         format!("{EVENT_PREFIX}{EV_SEQ}")
     };
-    let out = Command::new("/system/bin/cmd")
-        .args(["notification", "post", "-t", title, "-channel", CHANNEL, &id, text])
+    let msg = format!("{title}：{text}");
+    let out = notify_cmd()
+        .args([
+            "notification",
+            "post",
+            "-S",
+            "messaging",
+            "--conversation",
+            &id,
+            "--message",
+            &msg,
+            "-t",
+            title,
+            &id,
+            title,
+        ])
         .output();
     if let Err(e) = out {
         log::debug!("notify event failed: {e}");
@@ -77,11 +108,18 @@ pub fn ongoing(text: &str, min_interval_secs: u64) {
         }
         LAST_ONGOING = Some((now, text.to_string()));
     }
-    ensure_channel();
-    let out = Command::new("/system/bin/cmd")
+    allow_assistant();
+    let out = notify_cmd()
         .args([
-            "notification", "post", "--ongoing", "-t", "AmberGuard",
-            "-channel", CHANNEL, ONGOING_ID, text,
+            "notification",
+            "post",
+            "--ongoing",
+            "-t",
+            "AmberGuard",
+            "-channel",
+            CHANNEL,
+            ONGOING_ID,
+            text,
         ])
         .output();
     if let Err(e) = out {
@@ -94,7 +132,7 @@ pub fn cancel_ongoing() {
     if !cmd_available() {
         return;
     }
-    let _ = Command::new("/system/bin/cmd")
+    let _ = notify_cmd()
         .args(["notification", "remove", ONGOING_ID])
         .output();
     unsafe { LAST_ONGOING = None; }
@@ -102,5 +140,8 @@ pub fn cancel_ongoing() {
 
 /// 测试通知（WebUI 测试按钮调用）
 pub fn test() {
-    event("AmberGuard", "通知测试：如果你看到这条，说明通知功能正常工作。");
+    event(
+        "AmberGuard",
+        "通知测试：如果你看到这条，说明通知功能正常工作。",
+    );
 }

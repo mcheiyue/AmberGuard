@@ -725,7 +725,6 @@ function showToast(msg) {
 }
 
 async function connectAp(ssid, bssid) {
-  if (!confirm('连接到 ' + ssid + ' (' + bssid + ')？')) return;
   try {
     const r = await fetch('/api/connect', {
       method: 'POST',
