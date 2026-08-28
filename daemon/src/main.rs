@@ -2450,14 +2450,46 @@ fn offline_loop() -> ! {
     if let Ok(server) = Server::http(addr) {
         thread::spawn(move || {
             for req in server.incoming_requests() {
-                let s = snapshot2.lock().unwrap();
-                let json = s.to_json();
-                let _ = req.respond(Response::from_string(json));
+                let url = req.url().to_string();
+                let method = req.method().clone();
+                let path = url.split('?').next().unwrap_or(&url);
+                let resp = if method == Method::Get && (path == "/" || path == "/index.html") {
+                    let html = include_bytes!("web/static/index.html");
+                    let mut r = Response::from_data(html.to_vec());
+                    for kv in &[
+                        (&b"Content-Type"[..], &b"text/html; charset=utf-8"[..]),
+                        (&b"Access-Control-Allow-Origin"[..], &b"*"[..]),
+                    ] {
+                        if let Ok(h) = Header::from_bytes(kv.0, kv.1) {
+                            r.add_header(h);
+                        }
+                    }
+                    r
+                } else {
+                    let s = snapshot2.lock().unwrap();
+                    let json = s.to_json();
+                    let mut r = Response::from_string(json);
+                    if let Ok(h) = Header::from_bytes(&b"Access-Control-Allow-Origin"[..], &b"*"[..]) {
+                        r.add_header(h);
+                    }
+                    r
+                };
+                let _ = req.respond(resp);
             }
         });
     }
     let mut c = 0u32;
+    let mut last_wpa_retry = Instant::now();
     loop {
+        // 周期重试 wpa：成功则 exit(0) 让 service.sh 重拉进主循环
+        if last_wpa_retry.elapsed() >= Duration::from_secs(15) {
+            last_wpa_retry = Instant::now();
+            if let Ok(w) = WpaCtrl::auto_connect() {
+                log::info!("wpa reconnected in offline_loop, restarting to enter main loop");
+                drop(w);
+                std::process::exit(0);
+            }
+        }
         if let Ok(mut s) = snapshot.lock() {
             s.rssi = -55 - (c % 20) as i32;
             s.score = 42.0;
