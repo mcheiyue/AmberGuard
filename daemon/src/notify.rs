@@ -34,17 +34,25 @@ fn cmd_available() -> bool {
 /// 递增的事件通知序号（保证 ID 唯一）
 static mut EV_SEQ: u64 = 0;
 
+/// 确保通知渠道存在（Android 8+ 要求；MIUI 无渠道会静默丢弃）
+fn ensure_channel() {
+    let _ = Command::new("/system/bin/cmd")
+        .args(["notification", "create-channel", CHANNEL, "AmberGuard", "4"])
+        .output();
+}
+
 /// 发一次性事件通知（切换成功/失败、弱信号断开等）
 pub fn event(title: &str, text: &str) {
     if !cmd_available() {
         return;
     }
+    ensure_channel();
     let id = unsafe {
         EV_SEQ += 1;
         format!("{EVENT_PREFIX}{EV_SEQ}")
     };
     let out = Command::new("/system/bin/cmd")
-        .args(["notification", "post", "-t", title, &id, text])
+        .args(["notification", "post", "-t", title, "-channel", CHANNEL, &id, text])
         .output();
     if let Err(e) = out {
         log::debug!("notify event failed: {e}");
@@ -69,10 +77,11 @@ pub fn ongoing(text: &str, min_interval_secs: u64) {
         }
         LAST_ONGOING = Some((now, text.to_string()));
     }
+    ensure_channel();
     let out = Command::new("/system/bin/cmd")
         .args([
             "notification", "post", "--ongoing", "-t", "AmberGuard",
-            ONGOING_ID, text,
+            "-channel", CHANNEL, ONGOING_ID, text,
         ])
         .output();
     if let Err(e) = out {

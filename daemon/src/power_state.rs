@@ -137,7 +137,7 @@ fn dumpsys_wakefulness(cache: &mut Option<(Instant, PowerState)>) -> Option<Powe
     let out = Command::new("/system/bin/dumpsys")
         .arg("power")
         .output()
-        .or_else(|_| Command::new("dumpsys").arg("power").output())
+        .or_else(|_| Command::new("/system/bin/dumpsys").arg("power").output())
         .ok()?;
     if out.stdout.is_empty() {
         return None;

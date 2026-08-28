@@ -958,7 +958,7 @@ fn main() {
                             let _ = w.command("SCAN");
                         }
                         // 框架扫描：中文 SSID 更完整
-                        let _ = std::process::Command::new("cmd")
+                        let _ = std::process::Command::new("/system/bin/cmd")
                             .args(["wifi", "start-scan"])
                             .output();
                         thread::sleep(Duration::from_millis(1500));
@@ -980,7 +980,7 @@ fn main() {
                             (aps, saved, cur)
                         };
                         let cmd_aps = {
-                            let out = std::process::Command::new("cmd")
+                            let out = std::process::Command::new("/system/bin/cmd")
                                 .args(["wifi", "list-scan-results"])
                                 .output()
                                 .ok();
@@ -1763,7 +1763,7 @@ fn main() {
             if hint != SwitchHint::None || weak_rescue || want_roam_probe {
                 if last_scan.elapsed() > Duration::from_secs(scan_gap) || weak_rescue {
                     let _ = wpa.lock().unwrap().command("SCAN");
-                    let _ = std::process::Command::new("cmd")
+                    let _ = std::process::Command::new("/system/bin/cmd")
                         .args(["wifi", "start-scan"])
                         .output();
                     thread::sleep(Duration::from_secs(2));
@@ -1777,7 +1777,7 @@ fn main() {
                         .map(|r| parse_scan_results(&r))
                         .unwrap_or_default()
                 };
-                let cmd_scans = std::process::Command::new("cmd")
+                let cmd_scans = std::process::Command::new("/system/bin/cmd")
                     .args(["wifi", "list-scan-results"])
                     .output()
                     .ok()

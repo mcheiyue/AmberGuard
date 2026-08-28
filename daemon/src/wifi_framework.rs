@@ -41,7 +41,7 @@ pub fn ssids_from_cmd_list() -> Vec<String> {
 
 /// (ssid, security hint from list-networks line)
 fn network_rows_from_cmd() -> Vec<(String, Option<WifiSecurity>)> {
-    let out = Command::new("cmd")
+    let out = Command::new("/system/bin/cmd")
         .args(["wifi", "list-networks"])
         .output()
         .ok();
@@ -275,7 +275,7 @@ fn run_connect(ssid: &str, sec: WifiSecurity, psk: Option<&str>, bssid: Option<&
             args.push(b.to_string());
         }
     }
-    let out = Command::new("cmd")
+    let out = Command::new("/system/bin/cmd")
         .args(&args)
         .output()
         .map_err(|e| format!("无法执行 cmd wifi：{e}"))?;
