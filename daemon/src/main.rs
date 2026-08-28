@@ -1083,6 +1083,7 @@ fn main() {
                     json_resp(r#"{"ok":true,"reset":true}"#.into(), StatusCode(200))
                 }
                 (Method::Post, "/api/notify/test") => {
+                    log::info!("api notify/test requested");
                     notify::test();
                     json_resp(r#"{"ok":true}"#.into(), StatusCode(200))
                 }
@@ -1092,12 +1093,14 @@ fn main() {
                     let ssid = parsed.get("ssid").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     let bssid = parsed.get("bssid").and_then(|v| v.as_str()).unwrap_or("").to_string();
                     if ssid.is_empty() {
+                        log::warn!("api connect: empty ssid (bad request)");
                         json_resp(r#"{"ok":false,"error":"ssid is required"}"#.into(), StatusCode(400))
                     } else {
+                        log::info!("api connect: handling ssid={ssid} bssid={bssid}");
                         let bssid_arg = if bssid.is_empty() { None } else { Some(bssid.as_str()) };
                         match wifi_framework::framework_connect(&ssid, bssid_arg) {
                             Ok(()) => {
-                                log::info!("api connect: ssid={ssid} bssid={bssid}");
+                                log::info!("api connect: success ssid={ssid} bssid={bssid}");
                                 let hold_secs = { config_http.lock().unwrap().user_hold_secs };
                                 if hold_secs > 0 {
                                     *hold_http.lock().unwrap() = Some(HoldState {
@@ -1111,6 +1114,7 @@ fn main() {
                                 )
                             }
                             Err(e) => {
+                                log::warn!("api connect: failed ssid={ssid}: {e}");
                                 json_resp(
                                     format!(r#"{{"ok":false,"error":"{e}"}}"#),
                                     StatusCode(500),

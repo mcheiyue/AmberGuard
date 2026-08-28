@@ -710,6 +710,20 @@ async function resetConfig() {
   } catch (e) { if ($('err')) $('err').textContent = e.message; }
 }
 
+function showToast(msg) {
+  let t = $('toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toast';
+    t.style.cssText = 'position:fixed;left:50%;top:18px;transform:translateX(-50%);background:var(--ink,#222);color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;z-index:9999;max-width:82%;text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.35)';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.display = 'none'; }, 2800);
+}
+
 async function connectAp(ssid, bssid) {
   if (!confirm('连接到 ' + ssid + ' (' + bssid + ')？')) return;
   try {
@@ -720,16 +734,16 @@ async function connectAp(ssid, bssid) {
       cache: 'no-store'
     });
     const j = await r.json();
-    if (j.ok) { alert('已发送连接命令：' + ssid); tick(); }
-    else { alert('连接失败：' + (j.error || '未知错误')); }
-  } catch (e) { alert('连接请求失败：' + e.message); }
+    if (j.ok) { showToast('已发送连接命令：' + ssid); tick(); }
+    else { showToast('连接失败：' + (j.error || '未知错误')); }
+  } catch (e) { showToast('连接请求失败：' + e.message); }
 }
 
 async function testNotify() {
   try {
     await fetch('/api/notify/test', { method: 'POST', cache: 'no-store' });
-    alert('通知已发送，请查看通知栏');
-  } catch (e) { alert('发送失败：' + e.message); }
+    showToast('通知已发送，请查看通知栏');
+  } catch (e) { showToast('发送失败：' + e.message); }
 }
 
 async function clearHistory() {
