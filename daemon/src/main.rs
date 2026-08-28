@@ -2182,7 +2182,11 @@ fn main() {
                                 log::info!("switch OK -> {} ({})", peer.ssid, result);
                                 last_no_target_reason.clear();
                                 if notify_enable && notify_switch {
-                                    notify::event("AmberGuard", &format!("已切到 {}（{result}）", peer.ssid));
+                                    notify::event_id(
+                                    "AmberGuard",
+                                    &format!("已切换到 {}G：{}", peer.band, peer.ssid),
+                                    "amber_switch",
+                                );
                                 }
                             } else {
                                 if fail_streak_key == bond_key {
@@ -2219,7 +2223,7 @@ fn main() {
                                         snap.power_state = "WEAK_OFF".into();
                                     }
                                     if notify_enable && notify_weak {
-                                        notify::event("AmberGuard", &format!("弱信号断开（{rssi} dBm，切换救援失败）"));
+                                        notify::event("AmberGuard", &format!("弱信号已断开（{}dBm，救援切换未成功）", rssi));
                                     }
                                 }
                             }
@@ -2263,7 +2267,7 @@ fn main() {
                                     snap.power_state = "WEAK_OFF".into();
                                 }
                                 if notify_enable && notify_weak {
-                                    notify::event("AmberGuard", &format!("弱信号断开（{rssi} dBm，无可用网络）"));
+                                    notify::event("AmberGuard", &format!("弱信号已断开（{}dBm，无更优 AP）", rssi));
                                 }
                             }
                         }

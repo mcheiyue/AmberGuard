@@ -98,16 +98,26 @@ pub fn event(title: &str, text: &str) {
     let msg = format!("{title}：{text}");
     run_notify(&[
         "post",
-        "-S",
-        "messaging",
-        "--conversation",
-        &id,
-        "--message",
-        &msg,
         "-t",
         title,
         &id,
+        &msg,
+    ]);
+}
+
+/// 用固定 ID 发事件通知（同 ID 原地覆盖，不堆叠）。用于「已切换」这类只关心最新状态的事件。
+pub fn event_id(title: &str, text: &str, id: &str) {
+    if !cmd_available() {
+        return;
+    }
+    allow_assistant();
+    let msg = format!("{title}：{text}");
+    run_notify(&[
+        "post",
+        "-t",
         title,
+        id,
+        &msg,
     ]);
 }
 

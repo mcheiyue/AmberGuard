@@ -331,9 +331,9 @@ pub fn framework_connect(ssid: &str, bssid: Option<&str>) -> Result<(), String> 
     };
 
     let mut last_err = String::from("未尝试");
-    // 1) 不钉 BSSID（OEM 更稳）2) 再钉 BSSID
+    // 1) 先钉 BSSID（尊重用户/自动切换指定的 AP）2) 失败再退回不带 BSSID（框架自选最近/最强）
     let bssid_opts: &[Option<&str>] = if bssid.map(|b| !b.is_empty()).unwrap_or(false) {
-        &[None, bssid]
+        &[bssid, None]
     } else {
         &[None]
     };
