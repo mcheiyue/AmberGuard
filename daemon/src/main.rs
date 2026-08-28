@@ -2184,7 +2184,11 @@ fn main() {
                                 if notify_enable && notify_switch {
                                     notify::event_id(
                                     "AmberGuard",
-                                    &format!("已切换到 {}G：{}", peer.band, peer.ssid),
+                                    &format!(
+                                        "已切换到 {}：{}",
+                                        if peer.is_5g() { "5G" } else { "2.4G" },
+                                        peer.ssid
+                                    ),
                                     "amber_switch",
                                 );
                                 }
