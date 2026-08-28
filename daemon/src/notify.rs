@@ -30,6 +30,22 @@ fn cmd_available() -> bool {
     }
 }
 
+/// 找 su 二进制路径（各 ROM 位置不同：MIUI 多在 /system/bin/su，HyperOS 在 /product/bin/su）
+fn su_path() -> String {
+    for p in [
+        "/system/bin/su",
+        "/product/bin/su",
+        "/system/xbin/su",
+        "/data/adb/magisk/su",
+        "/data/adb/ksu/bin/su",
+    ] {
+        if std::path::Path::new(p).exists() {
+            return p.to_string();
+        }
+    }
+    "su".to_string()
+}
+
 /// 以干净 shell(uid 2000) 身份运行 `cmd notification ...`。
 /// 必须用 `su 2000 -c` 而非 setuid：su 会清掉 root 能力，MIUI/HyperOS 才放行；
 /// 仅 setuid(2000) 会保留 root 能力，framework 仍静默丢弃该通知。
@@ -43,18 +59,18 @@ fn run_notify(args: &[&str]) {
             cmd_str.push_str(a);
         }
     }
-    log::info!("[notify] run: su 2000 -c '{}'", cmd_str);
-    let out = Command::new("/system/bin/su")
+    let su = su_path();
+    log::debug!("[notify] run: {} 2000 -c '{}'", su, cmd_str);
+    let out = Command::new(&su)
         .args(["2000", "-c", &cmd_str])
         .output();
     match &out {
-        Ok(o) => log::info!(
-            "[notify] su ok status={} stdout={} stderr={}",
+        Ok(o) => log::debug!(
+            "[notify] su ok status={} stderr={}",
             o.status,
-            String::from_utf8_lossy(&o.stdout).trim(),
             String::from_utf8_lossy(&o.stderr).trim()
         ),
-        Err(e) => log::info!("[notify] su failed: {}", e),
+        Err(e) => log::debug!("[notify] su failed: {}", e),
     }
 }
 
