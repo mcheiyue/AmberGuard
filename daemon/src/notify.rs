@@ -21,11 +21,10 @@ fn cmd_available() -> bool {
         if let Some(ok) = CMD_OK {
             return ok;
         }
-        let ok = Command::new("/system/bin/cmd")
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        // 注意：Android 的 `cmd` 必须跟服务名（如 `cmd wifi`），`cmd --version` 会报
+        // "Can't find service: --version" 且退出码非 0，不能用来探活。
+        // 改为检查二进制是否存在。
+        let ok = std::path::Path::new("/system/bin/cmd").exists();
         CMD_OK = Some(ok);
         ok
     }
