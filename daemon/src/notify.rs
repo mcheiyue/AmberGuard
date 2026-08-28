@@ -44,9 +44,19 @@ fn run_notify(args: &[&str]) {
             cmd_str.push_str(a);
         }
     }
-    let _ = Command::new("/system/bin/su")
+    log::info!("[notify] run: su 2000 -c '{}'", cmd_str);
+    let out = Command::new("/system/bin/su")
         .args(["2000", "-c", &cmd_str])
         .output();
+    match &out {
+        Ok(o) => log::info!(
+            "[notify] su ok status={} stdout={} stderr={}",
+            o.status,
+            String::from_utf8_lossy(&o.stdout).trim(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => log::info!("[notify] su failed: {}", e),
+    }
 }
 
 /// 递增的事件通知序号（保证 ID 唯一）
