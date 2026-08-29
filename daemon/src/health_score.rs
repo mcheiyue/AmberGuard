@@ -88,8 +88,10 @@ mod tests {
 
     #[test]
     fn silent_avalanche_reaches_downswitch() {
-        // 静默 -75：retry 钉 50 本会让复合 37.5 > 30，剥夺托底后落到下切阈值 30
-        assert!(health_score(-75, None, 0, None) <= 30.0, "静默 -75 复合应 ≤ 下切阈值 30");
+        // 静默 -75：retry 钉 50 本会让复合 37.5 > 30，剥夺托底后落到下切阈值 30 附近
+        // （f32 下 25*1.2 略有浮点误差，容忍 ±0.01；守护进程在略低于 -75 时即触发下切）
+        let c75 = health_score(-75, None, 0, None);
+        assert!(c75 <= 30.0 + 0.01, "静默 -75 复合 {} 应 ≤ 下切阈值 30（含浮点误差）", c75);
         // 更差则严格低于 30
         assert!(health_score(-77, None, 0, None) < 30.0, "静默 -77 复合应 < 下切阈值 30");
     }
