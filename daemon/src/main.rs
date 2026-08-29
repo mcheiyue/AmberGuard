@@ -1284,14 +1284,15 @@ fn main() {
             roam_enable,
             roam_margin_db,
             roam_hold_secs,
-            notify_enable,
-            notify_switch,
-            notify_weak,
-            notify_ongoing_secs,
-        ) = {
-            let c = config.lock().unwrap();
-            (
-                c.mode == "pause",
+                notify_enable,
+                notify_switch,
+                notify_weak,
+                notify_ongoing_secs,
+                allow_weak_off_home,
+            ) = {
+                let c = config.lock().unwrap();
+                (
+                    c.mode == "pause",
                 c.score_switch_threshold,
                 c.score_detect_threshold,
                 c.upswitch_rssi_min_dbm,
@@ -1314,6 +1315,7 @@ fn main() {
                 c.notify_switch,
                 c.notify_weak,
                 c.notify_ongoing_secs,
+                c.allow_weak_off_home,
             )
         };
 
@@ -1712,8 +1714,8 @@ fn main() {
                 weak_disconnected = false;
             }
 
-            // 已配置家网且当前不在家网：不自动切、不弱信号断
-            if !home_aps.is_empty() && !in_home_now {
+            // 已配置家网且当前不在家网：不自动切、不弱信号断（开启 allow_weak_off_home 后仅在异地也允许弱信号）
+            if !home_aps.is_empty() && !in_home_now && !allow_weak_off_home {
                 weak_bad_since = None;
                 thread::sleep(Duration::from_secs(1));
                 continue;
@@ -1721,8 +1723,8 @@ fn main() {
 
             // 弱信号：先给切换机会，满时限仍差才考虑断（默认 off）
             // ponytail: OUT_OF_HOME/hold/pause 已在上方跳过
-            let mut weak_rescue = false;
-            if weak_action == "disconnect" && st.wpa_state == "COMPLETED" {
+        let mut weak_rescue = false;
+        if weak_action == "disconnect" && st.wpa_state == "COMPLETED" && !bssid_locked {
                 if rssi < rssi_disc {
                     if weak_bad_since.is_none() {
                         weak_bad_since = Some(Instant::now());
@@ -1730,8 +1732,9 @@ fn main() {
                     let elapsed = weak_bad_since
                         .map(|t| t.elapsed().as_secs())
                         .unwrap_or(0);
-                    // 满时限后每 ≥8s 救援一次，避免每秒 SCAN
-                    if elapsed >= weak_hold && last_scan.elapsed() >= Duration::from_secs(8) {
+                    // 满时限后每 ≥8s（eco 下 20s）救援一次，避免每秒 SCAN
+                    let weak_scan_gap = if eco { 20 } else { 8 };
+                    if elapsed >= weak_hold && last_scan.elapsed() >= Duration::from_secs(weak_scan_gap) {
                         weak_rescue = true;
                         log::info!(
                             "weak rescue window: rssi={rssi} < {rssi_disc} for {elapsed}s — try switch before disconnect"
@@ -1854,7 +1857,7 @@ fn main() {
                                     &scans,
                                     &ssid,
                                     false,
-                                    rssi_disc + 10,
+                                    -80,
                                     &home_aps,
                                 )
                                 .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid))
@@ -1909,6 +1912,19 @@ fn main() {
                     }
                 } else if !want_roam_probe && hint == SwitchHint::None {
                     roam_pending = None;
+                }
+
+                // 弱信号救援失败（无任何更优对端）→ 断开 WiFi（仅 weak_rescue 触发；修复旧「能下切却不断网」的死代码）
+                if weak_rescue && target.is_none() {
+                    log::warn!("weak disconnect: no better peer (still on {})", cur_bssid);
+                    let _ = wpa.lock().unwrap().command("DISCONNECT");
+                    weak_disconnected = true;
+                    weak_bad_since = None;
+                    if let Ok(mut snap) = snapshot.lock() {
+                        snap.last_error = format!("弱信号已断开（{rssi} dBm，无更优 AP）");
+                        snap.power_state = "WEAK_OFF".into();
+                    }
+                    continue;
                 }
 
                 if let Some(peer) = target {

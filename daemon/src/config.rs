@@ -64,6 +64,9 @@ pub struct Config {
     /// 家网 AP 列表（BSSID 主键）。非空时自动切换仅在组内进行。
     #[serde(default)]
     pub home_aps: Vec<crate::band_bond::HomeAp>,
+    /// 家网模式：当前不在家网（异地）时是否允许弱信号救援/断开。默认 false（异地不做任何自动处理，保安全）。
+    #[serde(default)]
+    pub allow_weak_off_home: bool,
     /// daily=自动切换 / eco=省电拉长防抖 / pause=仅观测
     #[serde(default = "default_mode")]
     pub mode: String,
@@ -191,6 +194,7 @@ impl Default for Config {
             score_switch_threshold: default_score_switch(),
             wpa_ctrl_path: None,
             home_aps: Vec::new(),
+            allow_weak_off_home: false,
             mode: default_mode(),
             log_level: default_log_level(),
             user_hold_secs: default_user_hold_secs(),
@@ -237,6 +241,7 @@ pub struct ConfigPatch {
     pub notify_switch: Option<bool>,
     pub notify_weak: Option<bool>,
     pub notify_ongoing_secs: Option<u64>,
+    pub allow_weak_off_home: Option<bool>,
 }
 
 /// 字段说明（给面板引导用）
@@ -394,14 +399,16 @@ impl Config {
     }
 
     pub fn apply_patch(&mut self, p: ConfigPatch) -> Result<(), ConfigError> {
+        // 原子应用：先在副本上改+校验，成功才写回 self，避免被拒的 patch 污染内存中的配置
+        let mut candidate = self.clone();
         if let Some(v) = p.score_detect_threshold {
-            self.score_detect_threshold = v.clamp(40.0, 95.0);
+            candidate.score_detect_threshold = v.clamp(40.0, 95.0);
         }
         if let Some(v) = p.score_switch_threshold {
-            self.score_switch_threshold = v.clamp(10.0, 80.0);
+            candidate.score_switch_threshold = v.clamp(10.0, 80.0);
         }
         if let Some(v) = p.upswitch_rssi_min_dbm {
-            self.upswitch_rssi_min_dbm = v.clamp(-85, -40);
+            candidate.upswitch_rssi_min_dbm = v.clamp(-85, -40);
         }
         if let Some(m) = p.mode {
             let m = m.to_lowercase();
@@ -410,12 +417,12 @@ impl Config {
                     "mode 只能是 daily / eco / pause".into(),
                 ));
             }
-            self.mode = m;
+            candidate.mode = m;
         }
         if let Some(lv) = p.log_level {
             let lv = lv.to_ascii_lowercase();
             match lv.as_str() {
-                "error" | "warn" | "info" | "debug" => self.log_level = lv,
+                "error" | "warn" | "info" | "debug" => candidate.log_level = lv,
                 _ => {
                     return Err(ConfigError::Validate(
                         "log_level 只能是 error/warn/info/debug".into(),
@@ -424,15 +431,15 @@ impl Config {
             }
         }
         if let Some(homes) = p.home_aps {
-            self.home_aps = normalize_home_aps(homes);
+            candidate.home_aps = normalize_home_aps(homes);
         }
         if let Some(iface) = p.interface {
             if !iface.is_empty() {
-                self.interface = iface;
+                candidate.interface = iface;
             }
         }
         if let Some(h) = p.user_hold_secs {
-            self.user_hold_secs = h.min(300);
+            candidate.user_hold_secs = h.min(300);
         }
         if let Some(a) = p.weak_action {
             let a = a.to_ascii_lowercase();
@@ -441,19 +448,19 @@ impl Config {
                     "weak_action 只能是 off 或 disconnect".into(),
                 ));
             }
-            self.weak_action = a;
+            candidate.weak_action = a;
         }
         if let Some(v) = p.rssi_disconnect_dbm {
-            self.rssi_disconnect_dbm = v.clamp(-95, -70);
+            candidate.rssi_disconnect_dbm = v.clamp(-95, -70);
         }
         if let Some(v) = p.weak_hold_secs {
-            self.weak_hold_secs = v.clamp(5, 60);
+            candidate.weak_hold_secs = v.clamp(5, 60);
         }
         if let Some(v) = p.auto_reconnect {
-            self.auto_reconnect = v;
+            candidate.auto_reconnect = v;
         }
         if let Some(v) = p.l3_probe_enable {
-            self.l3_probe_enable = v;
+            candidate.l3_probe_enable = v;
         }
         if let Some(b) = p.preferred_band {
             let b = b.trim().to_ascii_lowercase();
@@ -466,21 +473,26 @@ impl Config {
                     ));
                 }
             };
-            self.preferred_band = norm.into();
+            candidate.preferred_band = norm.into();
         }
         if let Some(s) = p.bssid_lock_secs {
-            self.bssid_lock_secs = s.min(300);
+            candidate.bssid_lock_secs = s.min(300);
         }
         if let Some(v) = p.roam_enable {
-            self.roam_enable = v;
+            candidate.roam_enable = v;
         }
         if let Some(m) = p.roam_margin_db {
-            self.roam_margin_db = m.clamp(5, 25);
+            candidate.roam_margin_db = m.clamp(5, 25);
         }
         if let Some(h) = p.roam_hold_secs {
-            self.roam_hold_secs = h.clamp(2, 30);
+            candidate.roam_hold_secs = h.clamp(2, 30);
         }
-        self.validate()
+        if let Some(v) = p.allow_weak_off_home {
+            candidate.allow_weak_off_home = v;
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
     }
 
     pub fn apply_preset(&mut self, id: &str) -> Result<(), ConfigError> {

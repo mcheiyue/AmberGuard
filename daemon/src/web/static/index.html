@@ -466,6 +466,10 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
               <option value="false">关</option>
             </select>
           </div>
+          <div class="setting-row">
+            <div><div>异地允许弱信号</div><div class="note detail" style="margin:0">家网模式下去了外地，也允许弱信号救援/断开（默认关，异地不自动处理）</div></div>
+            <label class="switch"><input type="checkbox" id="allowWeakOffHome" onchange="saveAllowWeakOffHome()"><span class="slider"></span></label>
+          </div>
         </div>
         <div class="btns">
           <button class="primary" type="button" onclick="saveWeak()">保存弱信号设置</button>
@@ -843,8 +847,14 @@ function renderFields(api) {
     const def = d[f.key];
     const div = document.createElement('div');
     div.className = 'field';
+    let fieldLabel = f.label;
+    if (f.key === 'upswitch_rssi_min_dbm') {
+      const pb = (c.preferred_band === '2.4') ? '2.4G' : '5G';
+      fieldLabel = '上切回 ' + pb + ' 的最低 RSSI';
+    }
     div.innerHTML =
-      '<label>' + f.label + ' <span class="def">默认 ' + def + (f.unit ? ' · ' + f.unit : '') + '</span></label>' +
+      '<label>' + fieldLabel + ' <span class="def">默认 ' + def + (f.unit ? ' · ' + f.unit : '') + '</span></label>' +
+      (f.key === 'upswitch_rssi_min_dbm' ? '<p class="note">含义随「偏好频段」翻转：偏好5G=回5G最低RSSI；偏好2.4G=回2.4G最低RSSI。</p>' : '') +
       '<p class="meaning"><strong>含义：</strong>' + f.meaning + '</p>' +
       '<p class="guide"><strong>怎么调：</strong>' + f.guide + '</p>' +
       '<div class="ctrl">' +
@@ -1017,6 +1027,7 @@ function syncSettingsForm() {
   if ($('notifyEnable')) $('notifyEnable').checked = c.notify_enable !== false;
   if ($('notifySwitch')) $('notifySwitch').checked = c.notify_switch !== false;
   if ($('notifyWeak')) $('notifyWeak').checked = c.notify_weak === true;
+  if ($('allowWeakOffHome')) $('allowWeakOffHome').checked = c.allow_weak_off_home === true;
   if ($('notifyOngoing')) $('notifyOngoing').value = c.notify_ongoing_secs || 0;
   homeSelected = {};
   (c.home_aps || []).forEach(h => {
@@ -1072,6 +1083,25 @@ async function saveNotify() {
     if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
     if (j.config) cfgCache = j;
     $('setMsg').textContent = '通知设置已保存';
+  } catch (e) {
+    $('setMsg').textContent = '';
+    $('setErr').textContent = e.message;
+  }
+}
+
+async function saveAllowWeakOffHome() {
+  $('setErr').textContent = '';
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ allow_weak_off_home: $('allowWeakOffHome').checked }),
+      cache: 'no-store'
+    });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    if (j.config) cfgCache = j;
+    $('setMsg').textContent = $('allowWeakOffHome').checked ? '已开启：异地允许弱信号' : '已关闭：异地不自动处理';
   } catch (e) {
     $('setMsg').textContent = '';
     $('setErr').textContent = e.message;
@@ -1378,9 +1408,10 @@ async function tick() {
     const th = j.thresholds || {};
     const thEl = $('thLines');
     if (thEl) {
+      const pbLabel = (cfgCache && cfgCache.config && cfgCache.config.preferred_band === '2.4') ? '2.4G' : '5G';
       thEl.innerHTML =
         '下切 <b>' + (th.score_switch_threshold ?? '—') + '</b> · 观察 <b>' +
-        (th.score_detect_threshold ?? '—') + '</b> · 回偏好≥ <b>' +
+        (th.score_detect_threshold ?? '—') + '</b> · 回 ' + pbLabel + '≥ <b>' +
         (th.upswitch_rssi_min_dbm ?? '—') + '</b> dBm';
     }
     const b5 = $('best5g');
