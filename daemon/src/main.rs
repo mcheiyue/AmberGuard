@@ -13,7 +13,7 @@ use crate::band_bond::{
     scan_views_filtered, stems_from_ssids,
 };
 use crate::config::{Config, ConfigPatch};
-use crate::health_score::health_score;
+use crate::health_score::{health_score, calc_dynamic_roam_margin};
 use crate::power_state::{PowerState, PowerStateManager};
 use crate::state_machine::{StateMachine, SwitchHint};
 use crate::station_info::{iw_station_dump, parse_iw_station, retry_rate, StationSample};
@@ -1871,11 +1871,12 @@ fn main() {
 
                 // 追优：仅同频更好家网 AP（不下 2.4）；dB 主判，分<观察线作门
                 if target.is_none() && want_roam_probe {
+                    let margin = calc_dynamic_roam_margin(rssi, roam_margin_db);
                     let better = best_on_band(
                         &scans,
                         &ssid,
                         preferred_is_5g,
-                        rssi + roam_margin_db,
+                        rssi + margin,
                         &home_aps,
                     )
                     .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid));
@@ -1887,7 +1888,7 @@ fn main() {
                                     && since.elapsed() >= Duration::from_secs(roam_hold_secs)
                             => {
                                 log::info!(
-                                    "roam fire: {} {} dBm (cur {rssi}, margin +{roam_margin_db}, hold {roam_hold_secs}s)",
+                                    "roam fire: {} {} dBm (cur {rssi}, margin +{margin}, hold {roam_hold_secs}s)",
                                     peer.bssid,
                                     peer.signal
                                 );
@@ -1900,7 +1901,7 @@ fn main() {
                             }
                             _ => {
                                 log::info!(
-                                    "roam candidate: {} sig={} (need +{roam_margin_db} dB vs {rssi}, hold {roam_hold_secs}s)",
+                                    "roam candidate: {} sig={} (need +{margin} dB vs {rssi}, hold {roam_hold_secs}s)",
                                     peer.bssid,
                                     peer.signal
                                 );
