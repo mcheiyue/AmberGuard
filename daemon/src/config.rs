@@ -349,7 +349,7 @@ pub struct PresetMeta {
 impl Config {
     pub fn field_meta() -> Vec<FieldMeta> {
         vec![
-            // 优先级：① 下切健康分 ② 上切 5G RSSI ③ 观察健康分（只观察/加扫，不单独触发切）
+            // 优先级：① 下切健康分 ② 上切偏好侧 RSSI ③ 观察健康分（只观察/加扫，不单独触发切）
             FieldMeta {
                 key: "score_switch_threshold",
                 label: "① 下切线（健康分）",
@@ -425,7 +425,7 @@ impl Config {
             PresetMeta {
                 id: "daily",
                 label: "均衡（推荐）",
-                desc: "下切30 / 观察70 / 上切5G≥-65。与运行模式无关。",
+                desc: "下切30 / 观察70 / 回偏好≥-65。与运行模式无关。",
                 score_detect_threshold: 70.0,
                 score_switch_threshold: 30.0,
                 upswitch_rssi_min_dbm: -65,
@@ -433,7 +433,7 @@ impl Config {
             PresetMeta {
                 id: "stable",
                 label: "更稳（少切）",
-                desc: "下切更低、上切要求 5G 更强 → 少折腾。",
+                desc: "下切更低、回偏好要求更强 → 少折腾。",
                 score_detect_threshold: 60.0,
                 score_switch_threshold: 22.0,
                 upswitch_rssi_min_dbm: -58,
@@ -441,7 +441,7 @@ impl Config {
             PresetMeta {
                 id: "sensitive",
                 label: "更敏（早切）",
-                desc: "下切更高、上切更松 → 更早下 2.4、更爱回 5G。",
+                desc: "下切更高、回偏好更松 → 更早离开偏好、更爱回偏好。",
                 score_detect_threshold: 78.0,
                 score_switch_threshold: 42.0,
                 upswitch_rssi_min_dbm: -70,
@@ -551,6 +551,18 @@ impl Config {
         }
         if let Some(h) = p.roam_hold_secs {
             candidate.roam_hold_secs = h.clamp(2, 30);
+        }
+        if let Some(v) = p.notify_enable {
+            candidate.notify_enable = v;
+        }
+        if let Some(v) = p.notify_switch {
+            candidate.notify_switch = v;
+        }
+        if let Some(v) = p.notify_weak {
+            candidate.notify_weak = v;
+        }
+        if let Some(v) = p.notify_ongoing_secs {
+            candidate.notify_ongoing_secs = v.min(300);
         }
         if let Some(v) = p.allow_weak_off_home {
             candidate.allow_weak_off_home = v;
@@ -726,5 +738,36 @@ impl Config {
         let text = toml::to_string_pretty(self)?;
         fs::write(path, text)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, ConfigPatch};
+
+    #[test]
+    fn apply_patch_updates_notification_fields() {
+        let mut config = Config::default();
+        config
+            .apply_patch(ConfigPatch {
+                notify_enable: Some(false),
+                notify_switch: Some(false),
+                notify_weak: Some(true),
+                notify_ongoing_secs: Some(45),
+                ..ConfigPatch::default()
+            })
+            .expect("notification patch should validate");
+
+        assert!(!config.notify_enable);
+        assert!(!config.notify_switch);
+        assert!(config.notify_weak);
+        assert_eq!(config.notify_ongoing_secs, 45);
+    }
+
+    #[test]
+    fn preset_descriptions_are_preference_neutral() {
+        assert!(Config::presets()
+            .iter()
+            .all(|preset| !preset.desc.contains("5G")));
     }
 }

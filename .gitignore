@@ -11,6 +11,7 @@ jniLibs/
 # IDE
 .vscode/
 .idea/
+.codegraph/
 
 # OS
 *.swp

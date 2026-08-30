@@ -59,8 +59,8 @@ pub fn link_in_home(home: &[HomeAp], bssid: &str, ssid: &str) -> bool {
     if home.is_empty() {
         return true;
     }
-    if !bssid.is_empty() && home_contains(home, bssid) {
-        return true;
+    if !bssid.is_empty() {
+        return home_contains(home, bssid);
     }
     // 回退：仅 SSID 命中（无 BSSID 时）
     !ssid.is_empty()
@@ -359,17 +359,12 @@ pub fn best_on_band_with(
     home: &[HomeAp],
     demoted: &[String],
 ) -> Option<ScanAp> {
-    let result = best_on_band(scans, current_ssid, want_5g, min_rssi, home);
-    if let Some(ap) = result {
-        let bssid_lower = ap.bssid.to_lowercase();
-        if demoted.iter().any(|d| d == &bssid_lower) {
-            // 降权中的 AP：跳过，返回 None 让守护留在当前链路
-            return None;
-        }
-        Some(ap)
-    } else {
-        None
-    }
+    let eligible: Vec<ScanAp> = scans
+        .iter()
+        .filter(|ap| !demoted.iter().any(|d| bssid_eq(d, &ap.bssid)))
+        .cloned()
+        .collect();
+    best_on_band(&eligible, current_ssid, want_5g, min_rssi, home)
 }
 
 /// 扫描结果转 API JSON 友好结构
@@ -503,7 +498,10 @@ pub fn network_id_for_ssid(list_raw: &str, ssid: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod ssid_decode_tests {
-    use super::{decode_wpa_ssid, mark_suggested_stem_pairs, ScanApView};
+    use super::{
+        best_on_band_with, decode_wpa_ssid, link_in_home, mark_suggested_stem_pairs, HomeAp,
+        ScanAp, ScanApView,
+    };
 
     #[test]
     fn decodes_utf8_hex_escape() {
@@ -625,5 +623,92 @@ mod ssid_decode_tests {
         }
         mark_suggested_stem_pairs(&mut v, None);
         assert!(v.iter().all(|x| !x.suggested));
+    }
+
+    #[test]
+    fn skips_demoted_strongest_and_uses_next_candidate() {
+        let scans = vec![
+            ScanAp {
+                bssid: "aa:aa:aa:aa:aa:01".into(),
+                freq: 5180,
+                signal: -40,
+                ssid: "HOME_5G".into(),
+            },
+            ScanAp {
+                bssid: "aa:aa:aa:aa:aa:02".into(),
+                freq: 5180,
+                signal: -55,
+                ssid: "HOME_5G".into(),
+            },
+        ];
+        let home = vec![
+            HomeAp {
+                bssid: scans[0].bssid.clone(),
+                ssid: scans[0].ssid.clone(),
+                band: "5".into(),
+            },
+            HomeAp {
+                bssid: scans[1].bssid.clone(),
+                ssid: scans[1].ssid.clone(),
+                band: "5".into(),
+            },
+        ];
+
+        let selected = best_on_band_with(
+            &scans,
+            "HOME",
+            true,
+            -80,
+            &home,
+            &[scans[0].bssid.clone()],
+        )
+        .expect("second candidate should remain selectable");
+
+        assert_eq!(selected.bssid, scans[1].bssid);
+    }
+
+    #[test]
+    fn returns_none_when_all_candidates_are_demoted() {
+        let scans = vec![
+            ScanAp {
+                bssid: "aa:aa:aa:aa:aa:01".into(),
+                freq: 5180,
+                signal: -40,
+                ssid: "HOME_5G".into(),
+            },
+            ScanAp {
+                bssid: "aa:aa:aa:aa:aa:02".into(),
+                freq: 5180,
+                signal: -55,
+                ssid: "HOME_5G".into(),
+            },
+        ];
+        let home = scans
+            .iter()
+            .map(|scan| HomeAp {
+                bssid: scan.bssid.clone(),
+                ssid: scan.ssid.clone(),
+                band: "5".into(),
+            })
+            .collect::<Vec<_>>();
+        let demoted = scans.iter().map(|scan| scan.bssid.clone()).collect::<Vec<_>>();
+
+        assert!(best_on_band_with(&scans, "HOME", true, -80, &home, &demoted).is_none());
+    }
+
+    #[test]
+    fn known_nonmatching_bssid_is_not_home() {
+        let home = vec![HomeAp {
+            bssid: "aa:aa:aa:aa:aa:01".into(),
+            ssid: "HOME".into(),
+            band: "auto".into(),
+        }];
+
+        assert!(!link_in_home(
+            &home,
+            "aa:aa:aa:aa:aa:02",
+            "HOME"
+        ));
+        assert!(link_in_home(&home, "", "HOME"));
     }
 }

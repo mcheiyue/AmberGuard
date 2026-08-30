@@ -4,6 +4,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
 
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
@@ -122,6 +123,34 @@ struct HoldState {
     kind: HoldKind,
     /// true=自动触发（流量保护），false=手动触发（用户点击）
     is_auto: bool,
+}
+
+fn clear_auto_soft_hold(hold_state: &Arc<Mutex<Option<HoldState>>>) {
+    if let Ok(mut h) = hold_state.lock() {
+        if h.as_ref()
+            .is_some_and(|s| s.kind == HoldKind::SoftPause && s.is_auto)
+        {
+            *h = None;
+        }
+    }
+}
+
+fn auto_soft_max_reached(started_at: Option<Instant>, max_mins: u64) -> bool {
+    max_mins > 0
+        && started_at
+            .map(|t| t.elapsed().as_secs() >= max_mins.saturating_mul(60))
+            .unwrap_or(false)
+}
+
+fn record_fail_streak(key: &mut String, streak: &mut u32, target: &str) -> bool {
+    let previous = if key == target { *streak } else { 0 };
+    if key == target {
+        *streak = streak.saturating_add(1);
+    } else {
+        *key = target.to_string();
+        *streak = 1;
+    }
+    previous < 3 && *streak >= 3
 }
 
 /// status.txt：状态边沿立即写；相同内容最多 15s 写一次
@@ -297,66 +326,175 @@ fn module_dir() -> Option<std::path::PathBuf> {
     exe.parent()?.parent().map(|p| p.to_path_buf())
 }
 
-/// 记录启动时关键文件的 mtime（用于热更新检测）
-struct ModuleFileMtimes {
-    binary: Option<std::time::SystemTime>,
-    sepolicy: Option<std::time::SystemTime>,
-    post_fs_data: Option<std::time::SystemTime>,
-    service_sh: Option<std::time::SystemTime>,
+const ACTIVE_MODULE_DIR: &str = "/data/adb/modules/AmberGuard";
+const UPDATE_MODULE_DIR: &str = "/data/adb/modules_update/AmberGuard";
+const HOT_UPDATE_READY_PATH: &str = "/data/adb/amberguard/hot_update_ready";
+const HOT_UPDATE_READY_TMP_PATH: &str = "/data/adb/amberguard/hot_update_ready.tmp";
+const HOT_UPDATE_FAILED_PATH: &str = "/data/adb/amberguard/hot_update_failed";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileSignature {
+    len: u64,
+    modified: Option<SystemTime>,
 }
 
-fn record_module_mtimes() -> ModuleFileMtimes {
-    let dir = module_dir().unwrap_or_else(|| std::path::PathBuf::from("/data/adb/modules/AmberGuard"));
-    let mtime = |name: &str| std::fs::metadata(dir.join(name))
-        .ok()
-        .and_then(|m| m.modified().ok());
-    ModuleFileMtimes {
-        binary: std::fs::metadata(dir.join("bin/amberguard")).ok().and_then(|m| m.modified().ok()),
-        sepolicy: mtime("sepolicy.rule"),
-        post_fs_data: mtime("post-fs-data.sh"),
-        service_sh: mtime("service.sh"),
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModuleUpdateSignature {
+    binary: FileSignature,
+    version: String,
+    reset_needed: bool,
+    webroot: Option<FileSignature>,
+    sepolicy: Option<Vec<u8>>,
+    post_fs_data: Option<Vec<u8>>,
+    service_sh: Option<Vec<u8>>,
+}
+
+fn current_module_dir() -> PathBuf {
+    module_dir().unwrap_or_else(|| PathBuf::from(ACTIVE_MODULE_DIR))
+}
+
+fn file_signature(path: &Path) -> Option<FileSignature> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
     }
+    Some(FileSignature {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
 }
 
-/// 检查 bin/amberguard 的 mtime 是否变化（模块被更新）
-fn binary_changed(start: &ModuleFileMtimes) -> bool {
-    let dir = module_dir().unwrap_or_else(|| std::path::PathBuf::from("/data/adb/modules/AmberGuard"));
-    let cur = std::fs::metadata(dir.join("bin/amberguard"))
-        .ok()
-        .and_then(|m| m.modified().ok());
-    match (start.binary, cur) {
-        (Some(a), Some(b)) => a != b,
-        _ => false,
-    }
-}
-
-/// 检查需重启的文件是否变化
-fn reboot_files_changed(start: &ModuleFileMtimes) -> bool {
-    let dir = module_dir().unwrap_or_else(|| std::path::PathBuf::from("/data/adb/modules/AmberGuard"));
-    let mtime = |name: &str| std::fs::metadata(dir.join(name))
-        .ok()
-        .and_then(|m| m.modified().ok());
-    let sep = mtime("sepolicy.rule");
-    let pfs = mtime("post-fs-data.sh");
-    let svc = mtime("service.sh");
-    sep != start.sepolicy || pfs != start.post_fs_data || svc != start.service_sh
-}
-
-/// 从 module.prop 读取版本号和 configResetNeeded 标记
-fn read_module_prop() -> (String, bool) {
-    let path = module_prop_path().unwrap_or_else(|| std::path::PathBuf::from("/data/adb/modules/AmberGuard/module.prop"));
-    let raw = std::fs::read_to_string(&path).unwrap_or_default();
-    let mut version = String::new();
+fn module_prop_info(dir: &Path) -> Option<(String, bool)> {
+    let raw = std::fs::read_to_string(dir.join("module.prop")).ok()?;
+    let mut version = None;
     let mut reset_needed = false;
     for line in raw.lines() {
         if let Some(v) = line.strip_prefix("version=") {
-            version = v.trim().to_string();
+            version = Some(v.trim().to_string());
         }
         if line.contains("configResetNeeded=true") || line.contains("configResetNeeded=1") {
             reset_needed = true;
         }
     }
-    (version, reset_needed)
+    Some((version?, reset_needed))
+}
+
+fn module_update_signature(dir: &Path) -> Option<ModuleUpdateSignature> {
+    let binary = file_signature(&dir.join("bin/amberguard"))?;
+    let (version, reset_needed) = module_prop_info(dir)?;
+    Some(ModuleUpdateSignature {
+        binary,
+        version,
+        reset_needed,
+        webroot: file_signature(&dir.join("webroot/index.html")),
+        sepolicy: std::fs::read(dir.join("sepolicy.rule")).ok(),
+        post_fs_data: std::fs::read(dir.join("post-fs-data.sh")).ok(),
+        service_sh: std::fs::read(dir.join("service.sh")).ok(),
+    })
+}
+
+fn record_module_state() -> Option<ModuleUpdateSignature> {
+    module_update_signature(&current_module_dir())
+}
+
+fn runtime_files_changed(
+    start: Option<&ModuleUpdateSignature>,
+    candidate: &ModuleUpdateSignature,
+) -> bool {
+    let Some(start) = start else {
+        return true;
+    };
+    start.binary != candidate.binary
+        || start.webroot != candidate.webroot
+        || start.reset_needed != candidate.reset_needed
+        || start.sepolicy != candidate.sepolicy
+        || start.post_fs_data != candidate.post_fs_data
+        || start.service_sh != candidate.service_sh
+}
+
+/// 检查需重启文件的内容是否变化；不使用暂存目录 mtime。
+fn reboot_files_changed(
+    start: Option<&ModuleUpdateSignature>,
+    candidate: &ModuleUpdateSignature,
+) -> bool {
+    let Some(start) = start else {
+        return true;
+    };
+    start.sepolicy != candidate.sepolicy
+        || start.post_fs_data != candidate.post_fs_data
+        || start.service_sh != candidate.service_sh
+}
+
+fn update_candidate(
+    start: Option<&ModuleUpdateSignature>,
+    current_dir: &Path,
+) -> Option<(PathBuf, ModuleUpdateSignature)> {
+    let staged = PathBuf::from(UPDATE_MODULE_DIR);
+    if staged != current_dir {
+        if let Some(signature) = module_update_signature(&staged) {
+            if start.map(|old| old != &signature).unwrap_or(true) {
+                return Some((staged, signature));
+            }
+        }
+    }
+
+    let current = module_update_signature(current_dir)?;
+    if runtime_files_changed(start, &current) {
+        Some((current_dir.to_path_buf(), current))
+    } else {
+        None
+    }
+}
+
+fn hot_update_source(candidate_dir: &Path) -> &'static str {
+    if candidate_dir == Path::new(UPDATE_MODULE_DIR) {
+        "modules_update"
+    } else {
+        "active"
+    }
+}
+
+fn write_hot_update_ready(source: &str) {
+    let _ = std::fs::create_dir_all("/data/adb/amberguard");
+    if std::fs::write(HOT_UPDATE_READY_TMP_PATH, format!("{source}\n")).is_ok() {
+        let _ = std::fs::rename(HOT_UPDATE_READY_TMP_PATH, HOT_UPDATE_READY_PATH);
+    }
+}
+
+fn clear_hot_update_ready() {
+    let _ = std::fs::remove_file(HOT_UPDATE_READY_PATH);
+    let _ = std::fs::remove_file(HOT_UPDATE_READY_TMP_PATH);
+}
+
+fn failed_update_version() -> Option<String> {
+    std::fs::read_to_string(HOT_UPDATE_FAILED_PATH)
+        .ok()
+        .map(|s| s.lines().next().unwrap_or_default().trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn clear_failed_update_if_candidate() {
+    if current_module_dir() == Path::new(UPDATE_MODULE_DIR) {
+        let _ = std::fs::remove_file(HOT_UPDATE_FAILED_PATH);
+    }
+}
+
+fn sync_candidate_webroot() {
+    if current_module_dir() != Path::new(UPDATE_MODULE_DIR) {
+        return;
+    }
+    let source = Path::new(UPDATE_MODULE_DIR).join("webroot/index.html");
+    let Ok(contents) = std::fs::read(&source) else {
+        return;
+    };
+    let target_dir = Path::new(ACTIVE_MODULE_DIR).join("webroot");
+    let target = target_dir.join("index.html");
+    let temporary = target_dir.join("index.html.amberguard.tmp");
+    if std::fs::create_dir_all(&target_dir).is_ok()
+        && std::fs::write(&temporary, contents).is_ok()
+    {
+        let _ = std::fs::rename(temporary, target);
+    }
 }
 
 fn push_history(hist: &Arc<Mutex<VecDeque<SwitchEvent>>>, ev: SwitchEvent) {
@@ -542,6 +680,8 @@ fn l3_http_one(
 fn status_summary_zh(
     band: &str,
     score: f32,
+    switch_th: f32,
+    detect_th: f32,
     mode: &str,
     hold_rem: u64,
     pen_rem: u64,
@@ -576,9 +716,9 @@ fn status_summary_zh(
     let pref = if prefer_5 { "5G" } else { "2.4G" };
     let mode_s = if mode == "eco" { "省电" } else { "日用" };
     if on_preferred {
-        if score >= 70.0 {
+        if score >= detect_th {
             format!("{band_zh} 良好 · {mode_s}守护中")
-        } else if score >= 30.0 {
+        } else if score >= switch_th {
             format!("{band_zh} 观察中 · 分 {score:.0}")
         } else {
             format!("{band_zh} 偏弱 · 可能下切")
@@ -624,6 +764,9 @@ fn read_body(req: &mut tiny_http::Request) -> String {
 fn main() {
     // 重启后模块文件已生效，清除上一轮热更新提示
     let _ = std::fs::remove_file("/data/adb/amberguard/update.txt");
+    clear_hot_update_ready();
+    clear_failed_update_if_candidate();
+    sync_candidate_webroot();
     let config = Arc::new(Mutex::new(Config::load().expect("config load")));
     {
         let c = config.lock().unwrap();
@@ -1279,8 +1422,11 @@ fn main() {
     let mut last_wpa_reconnect: Option<Instant> = None;
     let mut last_wpa_fail_log: Option<Instant> = None;
 
-    // 模块热更新检测：启动时记录关键文件 mtime
-    let mut start_mtimes = record_module_mtimes();
+    // 模块热更新检测：启动时记录当前模块状态；候选目录由固定路径单独探测
+    let start_module_state = record_module_state();
+    let mut last_update_probe: Option<(PathBuf, ModuleUpdateSignature)> = None;
+    let mut update_stable_polls: u8 = 0;
+    let mut handled_update: Option<(PathBuf, ModuleUpdateSignature)> = None;
     let mut last_mtime_check = Instant::now();
     // —— 自动观影保护状态 ——
     let mut auto_soft_active = false;
@@ -1367,46 +1513,78 @@ fn main() {
             log::info!("mode debounce: eco={eco}");
         }
 
-        // —— 模块热更新检测（每 5s 一次 stat，零开销）——
+        // —— 模块热更新检测（每 5s 一次；候选内容稳定后才处理）——
         if last_mtime_check.elapsed() >= Duration::from_secs(5) {
             last_mtime_check = Instant::now();
-            if binary_changed(&start_mtimes) {
-                let (new_ver, reset_flag) = read_module_prop();
-                let need_reboot = reboot_files_changed(&start_mtimes);
-                let msg = if need_reboot && reset_flag {
-                    format!("模块已更新到 {new_ver}：需重启手机生效，且本次更新需重置配置")
-                } else if need_reboot {
-                    format!("模块已更新到 {new_ver}：需重启手机才能完整生效")
-                } else if reset_flag {
-                    format!("模块已更新到 {new_ver}：本次更新需重置配置")
+            let current_dir = current_module_dir();
+            let candidate = update_candidate(start_module_state.as_ref(), &current_dir);
+            if let Some((candidate_dir, candidate_signature)) = candidate {
+                let probe = (candidate_dir.clone(), candidate_signature.clone());
+                if last_update_probe.as_ref() == Some(&probe) {
+                    update_stable_polls = update_stable_polls.saturating_add(1);
                 } else {
-                    format!("模块已更新到 {new_ver}，正在自动重启…")
-                };
-                log::info!("hot update detected: ver={new_ver} need_reboot={need_reboot} reset={reset_flag}");
-                let info = crate::web::UpdateInfo {
-                    detected: true,
-                    new_version: new_ver.clone(),
-                    need_reboot,
-                    need_config_reset: reset_flag,
-                    message: msg.clone(),
-                };
-                if let Ok(mut s) = snapshot.lock() {
-                    s.update_info = Some(info);
-                    s.summary = msg.clone();
+                    last_update_probe = Some(probe.clone());
+                    update_stable_polls = 1;
                 }
-                // 可热更新 → 退出让 service.sh 重拉新二进制；需重启/重置则留在旧进程提示用户
-                if !need_reboot && !reset_flag {
-                    write_status_txt("AmberGuard · 模块已更新 · 自动重启中");
-                    notify::event("AmberGuard 已热更新", &format!("已自动切换到 {new_ver}"));
-                    std::process::exit(0);
+                let blocked = failed_update_version()
+                    .as_deref()
+                    .is_some_and(|version| version == candidate_signature.version.as_str());
+                if blocked {
+                    if update_stable_polls >= 2 && handled_update.as_ref() != Some(&probe) {
+                        log::warn!(
+                            "hot update candidate blocked after launch failure: ver={}",
+                            candidate_signature.version
+                        );
+                        handled_update = Some(probe);
+                    }
+                } else if update_stable_polls >= 2 && handled_update.as_ref() != Some(&probe) {
+                    let new_ver = candidate_signature.version.clone();
+                    let reset_flag = candidate_signature.reset_needed;
+                    let need_reboot =
+                        reboot_files_changed(start_module_state.as_ref(), &candidate_signature);
+                    let msg = if need_reboot && reset_flag {
+                        format!("模块已更新到 {new_ver}：需重启手机生效，且本次更新需重置配置")
+                    } else if need_reboot {
+                        format!("模块已更新到 {new_ver}：需重启手机才能完整生效")
+                    } else if reset_flag {
+                        format!("模块已更新到 {new_ver}：本次更新需重置配置")
+                    } else {
+                        format!("模块已更新到 {new_ver}，正在自动重启…")
+                    };
+                    log::info!(
+                        "hot update detected: source={} ver={new_ver} need_reboot={need_reboot} reset={reset_flag}",
+                        hot_update_source(&candidate_dir)
+                    );
+                    let info = crate::web::UpdateInfo {
+                        detected: true,
+                        new_version: new_ver.clone(),
+                        need_reboot,
+                        need_config_reset: reset_flag,
+                        message: msg.clone(),
+                    };
+                    if let Ok(mut s) = snapshot.lock() {
+                        s.update_info = Some(info);
+                        s.summary = msg.clone();
+                    }
+                    // 可热更新 → 标记候选来源并退出，让 service.sh 重拉新进程。
+                    if !need_reboot && !reset_flag {
+                        write_hot_update_ready(hot_update_source(&candidate_dir));
+                        write_status_txt("AmberGuard · 模块已更新 · 自动重启中");
+                        notify::event(
+                            "AmberGuard 已热更新",
+                            &format!("已自动切换到 {new_ver}"),
+                        );
+                        std::process::exit(0);
+                    }
+                    let _ = std::fs::write("/data/adb/amberguard/update.txt", &msg);
+                    // 需重启/需重置：发系统通知，不开面板也能看到
+                    notify::event("AmberGuard 已更新", &msg);
+                    handled_update = Some(probe);
                 }
-                let _ = std::fs::write("/data/adb/amberguard/update.txt", &msg);
-                // 需重启/需重置：发系统通知，不开面板也能看到
-                notify::event("AmberGuard 已更新", &msg);
-                // 首检后刷新 binary 基线，止住每 5s 重复触发（Branch B 防通知堆叠）
-                start_mtimes.binary = std::fs::metadata(
-                    module_dir().unwrap_or_else(|| std::path::PathBuf::from("/data/adb/modules/AmberGuard")).join("bin/amberguard")
-                ).ok().and_then(|m| m.modified().ok());
+            } else {
+                last_update_probe = None;
+                update_stable_polls = 0;
+                handled_update = None;
             }
         }
 
@@ -1585,7 +1763,26 @@ fn main() {
             };
 
             // —— 自动观影保护状态机 ——
-            if soft_auto_enable && !screen_off && !paused {
+            if !soft_auto_enable {
+                let was_active = auto_soft_active;
+                auto_soft_active = false;
+                auto_soft_started_at = None;
+                auto_soft_high_since = None;
+                auto_soft_low_since = None;
+                clear_auto_soft_hold(&hold_state);
+                if was_active {
+                    log::info!("auto soft-pause disabled: clear automatic hold");
+                }
+            } else if auto_soft_active
+                && auto_soft_max_reached(auto_soft_started_at, soft_auto_max_mins)
+            {
+                auto_soft_active = false;
+                auto_soft_started_at = None;
+                auto_soft_high_since = None;
+                auto_soft_low_since = None;
+                clear_auto_soft_hold(&hold_state);
+                log::info!("auto soft-pause released: maximum duration reached");
+            } else if !screen_off && !paused {
                 let kbps = cached_traffic_kbps.unwrap_or(0.0);
                 if auto_soft_active {
                     // 保护中：检查是否该解除
@@ -1597,23 +1794,12 @@ fn main() {
                         let low_elapsed = auto_soft_low_since
                             .map(|t| t.elapsed().as_secs())
                             .unwrap_or(0);
-                        // 防死锁：超过 max_mins 强制退出
-                        let max_secs = soft_auto_max_mins * 60;
-                        let over_max = max_secs > 0
-                            && auto_soft_started_at
-                                .map(|t| t.elapsed().as_secs() >= max_secs)
-                                .unwrap_or(false);
-                        if low_elapsed >= soft_auto_release_secs || over_max {
-                            // 退出自动保护
+                        if low_elapsed >= soft_auto_release_secs {
                             auto_soft_active = false;
                             auto_soft_started_at = None;
                             auto_soft_low_since = None;
                             auto_soft_high_since = None;
-                            if let Ok(mut h) = hold_state.lock() {
-                                if h.as_ref().is_some_and(|s| s.kind == HoldKind::SoftPause && s.is_auto) {
-                                    *h = None;
-                                }
-                            }
+                            clear_auto_soft_hold(&hold_state);
                             log::info!(
                                 "auto soft-pause released: traffic={kbps:.0} KB/s, low for {low_elapsed}s"
                             );
@@ -1660,7 +1846,7 @@ fn main() {
                     }
                 }
             } else {
-                // 息屏/暂停/关闭：重置触发计时但保留 active 状态（息屏前已触发的保护继续）
+                // 息屏/暂停：重置触发计时但保留 active 状态（息屏前已触发的保护继续）
                 auto_soft_high_since = None;
                 if !auto_soft_active {
                     auto_soft_low_since = None;
@@ -1767,6 +1953,8 @@ fn main() {
                     status_summary_zh(
                         band,
                         score,
+                        switch_th,
+                        detect_th,
                         &mode,
                         hold_rem_now,
                         pen_rem,
@@ -1952,8 +2140,8 @@ fn main() {
                     .map(|o| parse_cmd_scan_results(&String::from_utf8_lossy(&o.stdout)))
                     .unwrap_or_default();
                 let scans = merge_scan_aps(wpa_scans, cmd_scans);
-                // 更新家网 5G 最强（不论是否达标），供面板对照上切线
-                // 偏好频段上最强家网 AP（上切对照）；字段名历史原因仍叫 best_5g
+                // 更新偏好频段最强家网 AP（不论是否达标），供面板对照上切线
+                // 字段名因历史兼容仍叫 best_5g
                 cached_best_5g = scans
                     .iter()
                     .filter(|a| {
@@ -2241,6 +2429,50 @@ fn main() {
                                     }
                                 }
                             }
+                            // 同名 ROAM 已接受但未落地：改走 Framework，兼容部分 OEM 的裸 ROAM 行为
+                            if !ok && same_ssid {
+                                log::warn!(
+                                    "ROAM accepted but not landed: want {}/{}; try framework fallback",
+                                    peer.ssid,
+                                    peer.bssid
+                                );
+                                match wifi_framework::framework_connect(
+                                    &peer.ssid,
+                                    Some(&peer.bssid),
+                                ) {
+                                    Ok(()) => {
+                                        for i in 0..48 {
+                                            thread::sleep(Duration::from_millis(250));
+                                            if let Ok(w) = wpa.lock() {
+                                                if let Ok(s2) = w.status() {
+                                                    last_got = format!(
+                                                        "{}|{}|{}",
+                                                        s2.wpa_state,
+                                                        s2.ssid.clone().unwrap_or_default(),
+                                                        s2.bssid.clone().unwrap_or_default()
+                                                    );
+                                                    if link_reached_peer(
+                                                        &s2,
+                                                        &peer.ssid,
+                                                        &peer.bssid,
+                                                        true,
+                                                    ) {
+                                                        ok = true;
+                                                        log::info!(
+                                                            "framework fallback verified at {}ms",
+                                                            (i + 1) * 250
+                                                        );
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log::warn!("framework fallback after ROAM failed: {e}");
+                                    }
+                                }
+                            }
                             // 未落地且异名：再试一次不带 BSSID 的框架连接（部分机 -b 空转）
                             if !ok && !same_ssid {
                                 log::info!("retry framework connect without bssid -> {}", peer.ssid);
@@ -2388,12 +2620,11 @@ fn main() {
                                 );
                                 }
                             } else {
-                                if fail_streak_key == bond_key {
-                                    fail_streak = fail_streak.saturating_add(1);
-                                } else {
-                                    fail_streak_key = bond_key.clone();
-                                    fail_streak = 1;
-                                }
+                                let entered_backoff = record_fail_streak(
+                                    &mut fail_streak_key,
+                                    &mut fail_streak,
+                                    &bond_key,
+                                );
                                 if bssid_memory_enable {
                                     if let Ok(mut m) = bssid_stats_map.lock() {
                                         bssid_stats::record_fail(&mut m, &peer.bssid, bssid_demote_secs);
@@ -2406,7 +2637,7 @@ fn main() {
                                     let back = back.min(600);
                                     fail_backoff_until =
                                         Some(Instant::now() + Duration::from_secs(back));
-                                    if notify_enable {
+                                    if entered_backoff && notify_enable && notify_switch {
                                         notify::fail_backoff(&peer.ssid, back);
                                     }
                                     log::warn!(
@@ -2457,6 +2688,31 @@ fn main() {
                                     duration_ms: switch_t0.elapsed().as_millis() as u64,
                                 },
                             );
+                            let entered_backoff = record_fail_streak(
+                                &mut fail_streak_key,
+                                &mut fail_streak,
+                                &bond_key,
+                            );
+                            if let Ok(mut snap) = snapshot.lock() {
+                                snap.last_error = msg.clone();
+                            }
+                            if fail_streak >= 3 {
+                                let back = (180 + (fail_streak as u64 - 3) * 60).min(600);
+                                fail_backoff_until =
+                                    Some(Instant::now() + Duration::from_secs(back));
+                                if entered_backoff && notify_enable && notify_switch {
+                                    notify::fail_backoff(&peer.ssid, back);
+                                }
+                                log::warn!(
+                                    "switch fail streak={fail_streak} target={bond_key} → backoff {back}s"
+                                );
+                                if let Ok(mut snap) = snapshot.lock() {
+                                    snap.last_error = format!(
+                                        "连「{}」连续失败 {fail_streak} 次，已退避 {back}s。请系统里检查该网是否被停用后重连保存",
+                                        peer.ssid
+                                    );
+                                }
+                            }
                             sm.enter_penalty(&bond_key);
                             if msg.contains("请先在系统设置") || msg.contains("no network id") {
                                 if let Some(p) = sm.penalty.as_mut() {
@@ -2511,13 +2767,14 @@ fn main() {
                             true
                         };
                         if do_log {
+                            let preferred_band_label = if preferred_is_5g { "5G" } else { "2.4G" };
                             let why = match hint {
                                 SwitchHint::Upswitch => match cached_best_5g {
                                     Some(b) => format!(
-                                        "上切未执行：家网 5G 最强 {b} dBm < 上切线 {up_rssi} dBm"
+                                        "上切未执行：家网 {preferred_band_label} 最强 {b} dBm < 上切线 {up_rssi} dBm"
                                     ),
                                     None => format!(
-                                        "上切未执行：未扫到家网 5G（上切线 {up_rssi} dBm）"
+                                        "上切未执行：未扫到家网 {preferred_band_label}（上切线 {up_rssi} dBm）"
                                     ),
                                 },
                                 SwitchHint::Downswitch => {
@@ -2735,5 +2992,90 @@ fn offline_loop() -> ! {
         }
         c += 1;
         thread::sleep(Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        auto_soft_max_reached, record_fail_streak, reboot_files_changed, status_summary_zh,
+        FileSignature, ModuleUpdateSignature,
+    };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn automatic_protection_maximum_is_checked() {
+        let now = Instant::now();
+        assert!(auto_soft_max_reached(
+            Some(now - Duration::from_secs(61)),
+            1
+        ));
+        assert!(!auto_soft_max_reached(
+            Some(now - Duration::from_secs(61)),
+            0
+        ));
+    }
+
+    #[test]
+    fn status_summary_uses_runtime_thresholds() {
+        let summary = status_summary_zh(
+            "5",
+            65.0,
+            40.0,
+            78.0,
+            "daily",
+            0,
+            0,
+            true,
+            0,
+            false,
+            false,
+            true,
+            0,
+            true,
+        );
+
+        assert_eq!(summary, "5G 观察中 · 分 65");
+    }
+
+    #[test]
+    fn fail_backoff_edge_is_only_the_third_failure() {
+        let mut key = String::new();
+        let mut streak = 0;
+        assert!(!record_fail_streak(&mut key, &mut streak, "target"));
+        assert!(!record_fail_streak(&mut key, &mut streak, "target"));
+        assert!(record_fail_streak(&mut key, &mut streak, "target"));
+        assert!(!record_fail_streak(&mut key, &mut streak, "target"));
+        assert_eq!(streak, 4);
+    }
+
+    #[test]
+    fn reboot_classification_uses_file_content() {
+        let base = ModuleUpdateSignature {
+            binary: FileSignature {
+                len: 10,
+                modified: None,
+            },
+            version: "v0.5.28".into(),
+            reset_needed: false,
+            webroot: None,
+            sepolicy: Some(b"same".to_vec()),
+            post_fs_data: Some(b"same".to_vec()),
+            service_sh: Some(b"same".to_vec()),
+        };
+        let same_content = ModuleUpdateSignature {
+            binary: FileSignature {
+                len: 10,
+                modified: Some(std::time::SystemTime::UNIX_EPOCH),
+            },
+            ..base.clone()
+        };
+        let changed_content = ModuleUpdateSignature {
+            sepolicy: Some(b"changed".to_vec()),
+            ..same_content.clone()
+        };
+
+        assert!(!reboot_files_changed(Some(&base), &same_content));
+        assert!(reboot_files_changed(Some(&base), &changed_content));
     }
 }

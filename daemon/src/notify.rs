@@ -46,18 +46,28 @@ fn su_path() -> String {
     "su".to_string()
 }
 
+fn shell_quote(arg: &str) -> String {
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('\'');
+    for ch in arg.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
 /// 以干净 shell(uid 2000) 身份运行 `cmd notification ...`。
 /// 必须用 `su 2000 -c` 而非 setuid：su 会清掉 root 能力，MIUI/HyperOS 才放行；
 /// 仅 setuid(2000) 会保留 root 能力，framework 仍静默丢弃该通知。
 fn run_notify(args: &[&str]) {
     let mut cmd_str = String::from("cmd notification");
     for a in args {
-        if a.contains(' ') || a.contains('"') || a.contains('\\') {
-            cmd_str.push_str(&format!(" \"{}\"", a.replace('\\', "\\\\").replace('"', "\\\"")));
-        } else {
-            cmd_str.push(' ');
-            cmd_str.push_str(a);
-        }
+        cmd_str.push(' ');
+        cmd_str.push_str(&shell_quote(a));
     }
     let su = su_path();
     log::debug!("[notify] run: {} 2000 -c '{}'", su, cmd_str);
@@ -178,4 +188,19 @@ pub fn fail_backoff(ssid: &str, back_secs: u64) {
         &format!("切换至「{ssid}」连续失败，已暂停尝试 {back_mins} 分钟"),
         "amber_fail_backoff",
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    fn quotes_shell_metacharacters_as_literal_text() {
+        assert_eq!(shell_quote("a; $(id)\n"), "'a; $(id)\n'");
+    }
+
+    #[test]
+    fn quotes_embedded_single_quote() {
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
 }
