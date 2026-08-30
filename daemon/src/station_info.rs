@@ -1,7 +1,6 @@
 //! 解析 `iw dev wlan0 station dump` 输出，获取 tx_retries / tx_packets
 //! Phase 2.5：替代 neli 直接解析，零额外依赖
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 #[derive(Debug, Clone)]
@@ -11,6 +10,8 @@ pub struct StationSample {
     pub tx_failed: u64,
     pub rx_packets: u64,
     pub signal: Option<i32>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
     pub timestamp: Instant,
 }
 
@@ -22,6 +23,8 @@ impl Default for StationSample {
             tx_failed: 0,
             rx_packets: 0,
             signal: None,
+            rx_bytes: 0,
+            tx_bytes: 0,
             timestamp: Instant::now(),
         }
     }
@@ -45,6 +48,10 @@ pub fn parse_iw_station(text: &str) -> StationSample {
             s.tx_failed = v;
         } else if let Some(v) = parse_signal(t, "signal:") {
             s.signal = Some(v);
+        } else if let Some(v) = parse_kv(t, "rx bytes:\t") {
+            s.rx_bytes = v;
+        } else if let Some(v) = parse_kv(t, "tx bytes:\t") {
+            s.tx_bytes = v;
         }
     }
     s
@@ -89,4 +96,16 @@ pub fn iw_station_dump(iface: &str) -> Result<String, String> {
         return Err(format!("iw exit {}: {}", out.status, stderr.trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// 计算双向流量速率（KB/s）：(Δrx_bytes + Δtx_bytes) / Δt
+/// 采样间隔太短（<0.5s）时返回 None 避免噪声
+pub fn traffic_rate_kbps(prev: &StationSample, cur: &StationSample) -> Option<f32> {
+    let dbytes = cur.rx_bytes.saturating_sub(prev.rx_bytes)
+        + cur.tx_bytes.saturating_sub(prev.tx_bytes);
+    let dt = prev.timestamp.elapsed().as_secs_f32();
+    if dt < 0.5 {
+        return None;
+    }
+    Some(dbytes as f32 / dt / 1024.0)
 }

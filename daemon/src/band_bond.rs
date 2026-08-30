@@ -350,6 +350,28 @@ pub fn best_on_band(
         .cloned()
 }
 
+/// 带降权过滤的 best_on_band：剔除处于降权期的 BSSID
+pub fn best_on_band_with(
+    scans: &[ScanAp],
+    current_ssid: &str,
+    want_5g: bool,
+    min_rssi: i32,
+    home: &[HomeAp],
+    demoted: &[String],
+) -> Option<ScanAp> {
+    let result = best_on_band(scans, current_ssid, want_5g, min_rssi, home);
+    if let Some(ap) = result {
+        let bssid_lower = ap.bssid.to_lowercase();
+        if demoted.iter().any(|d| d == &bssid_lower) {
+            // 降权中的 AP：跳过，返回 None 让守护留在当前链路
+            return None;
+        }
+        Some(ap)
+    } else {
+        None
+    }
+}
+
 /// 扫描结果转 API JSON 友好结构
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanApView {

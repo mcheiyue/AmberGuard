@@ -118,6 +118,30 @@ pub struct Config {
     /// 常驻状态条更新间隔秒。0=关。默认 0。
     #[serde(default)]
     pub notify_ongoing_secs: u64,
+    /// 自动大流量保护总开关（默认 true）
+    #[serde(default = "default_soft_auto_enable")]
+    pub soft_auto_enable: bool,
+    /// 触发保护的流量阈值（KB/s，默认 400，范围 100~5000）
+    #[serde(default = "default_soft_auto_on_kb")]
+    pub soft_auto_on_kb: u64,
+    /// 解除保护的流量阈值（KB/s，默认 80，范围 20~1000，须 < on_kb）
+    #[serde(default = "default_soft_auto_off_kb")]
+    pub soft_auto_off_kb: u64,
+    /// 持续高于触发线多少秒才进入保护（默认 12，范围 3~60）
+    #[serde(default = "default_soft_auto_trigger_secs")]
+    pub soft_auto_trigger_secs: u64,
+    /// 持续低于解除线多少秒才退出保护（默认 45，范围 10~180）
+    #[serde(default = "default_soft_auto_release_secs")]
+    pub soft_auto_release_secs: u64,
+    /// 连续自动保护最长分钟数上限（默认 240，0=不限）
+    #[serde(default = "default_soft_auto_max_mins")]
+    pub soft_auto_max_mins: u64,
+    /// BSSID 质量记忆降权开关（默认 true）
+    #[serde(default = "default_bssid_memory_enable")]
+    pub bssid_memory_enable: bool,
+    /// 故障 AP 降权冷却时长（秒，默认 1800=30分钟，范围 300~7200）
+    #[serde(default = "default_bssid_demote_secs")]
+    pub bssid_demote_secs: u64,
 }
 
 fn default_interface() -> String {
@@ -184,6 +208,31 @@ fn default_notify_weak() -> bool {
     false
 }
 
+fn default_soft_auto_enable() -> bool {
+    true
+}
+fn default_soft_auto_on_kb() -> u64 {
+    400
+}
+fn default_soft_auto_off_kb() -> u64 {
+    80
+}
+fn default_soft_auto_trigger_secs() -> u64 {
+    12
+}
+fn default_soft_auto_release_secs() -> u64 {
+    45
+}
+fn default_soft_auto_max_mins() -> u64 {
+    240
+}
+fn default_bssid_memory_enable() -> bool {
+    true
+}
+fn default_bssid_demote_secs() -> u64 {
+    1800
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -212,6 +261,14 @@ impl Default for Config {
             notify_switch: default_notify_switch(),
             notify_weak: default_notify_weak(),
             notify_ongoing_secs: 0,
+            soft_auto_enable: default_soft_auto_enable(),
+            soft_auto_on_kb: default_soft_auto_on_kb(),
+            soft_auto_off_kb: default_soft_auto_off_kb(),
+            soft_auto_trigger_secs: default_soft_auto_trigger_secs(),
+            soft_auto_release_secs: default_soft_auto_release_secs(),
+            soft_auto_max_mins: default_soft_auto_max_mins(),
+            bssid_memory_enable: default_bssid_memory_enable(),
+            bssid_demote_secs: default_bssid_demote_secs(),
         }
     }
 }
@@ -242,6 +299,14 @@ pub struct ConfigPatch {
     pub notify_weak: Option<bool>,
     pub notify_ongoing_secs: Option<u64>,
     pub allow_weak_off_home: Option<bool>,
+    pub soft_auto_enable: Option<bool>,
+    pub soft_auto_on_kb: Option<u64>,
+    pub soft_auto_off_kb: Option<u64>,
+    pub soft_auto_trigger_secs: Option<u64>,
+    pub soft_auto_release_secs: Option<u64>,
+    pub soft_auto_max_mins: Option<u64>,
+    pub bssid_memory_enable: Option<bool>,
+    pub bssid_demote_secs: Option<u64>,
 }
 
 /// 字段说明（给面板引导用）
@@ -490,6 +555,30 @@ impl Config {
         if let Some(v) = p.allow_weak_off_home {
             candidate.allow_weak_off_home = v;
         }
+        if let Some(v) = p.soft_auto_enable {
+            candidate.soft_auto_enable = v;
+        }
+        if let Some(v) = p.soft_auto_on_kb {
+            candidate.soft_auto_on_kb = v.clamp(100, 5000);
+        }
+        if let Some(v) = p.soft_auto_off_kb {
+            candidate.soft_auto_off_kb = v.clamp(20, 1000);
+        }
+        if let Some(v) = p.soft_auto_trigger_secs {
+            candidate.soft_auto_trigger_secs = v.clamp(3, 60);
+        }
+        if let Some(v) = p.soft_auto_release_secs {
+            candidate.soft_auto_release_secs = v.clamp(10, 180);
+        }
+        if let Some(v) = p.soft_auto_max_mins {
+            candidate.soft_auto_max_mins = v.min(1440);
+        }
+        if let Some(v) = p.bssid_memory_enable {
+            candidate.bssid_memory_enable = v;
+        }
+        if let Some(v) = p.bssid_demote_secs {
+            candidate.bssid_demote_secs = v.clamp(300, 7200);
+        }
         candidate.validate()?;
         *self = candidate;
         Ok(())
@@ -517,6 +606,12 @@ impl Config {
             return Err(ConfigError::Validate(
                 "weak_action 只能是 off 或 disconnect".into(),
             ));
+        }
+        if self.soft_auto_on_kb <= self.soft_auto_off_kb {
+            return Err(ConfigError::Validate(format!(
+                "触发速率({} KB/s) 必须大于 解除速率({} KB/s)",
+                self.soft_auto_on_kb, self.soft_auto_off_kb
+            )));
         }
         Ok(())
     }
@@ -608,6 +703,14 @@ impl Config {
         self.weak_hold_secs = cfg.weak_hold_secs;
         self.auto_reconnect = cfg.auto_reconnect;
         self.l3_probe_enable = cfg.l3_probe_enable;
+        self.soft_auto_enable = cfg.soft_auto_enable;
+        self.soft_auto_on_kb = cfg.soft_auto_on_kb;
+        self.soft_auto_off_kb = cfg.soft_auto_off_kb;
+        self.soft_auto_trigger_secs = cfg.soft_auto_trigger_secs;
+        self.soft_auto_release_secs = cfg.soft_auto_release_secs;
+        self.soft_auto_max_mins = cfg.soft_auto_max_mins;
+        self.bssid_memory_enable = cfg.bssid_memory_enable;
+        self.bssid_demote_secs = cfg.bssid_demote_secs;
         Ok(())
     }
 

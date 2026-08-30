@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::band_bond::{
-    best_on_band, dual_band_pair_saved, home_contains, link_in_home, merge_scan_aps,
+    best_on_band_with, dual_band_pair_saved, home_contains, link_in_home, merge_scan_aps,
     network_id_for_ssid, parse_cmd_scan_results, parse_list_networks, parse_scan_results,
     scan_views_filtered, stems_from_ssids,
 };
@@ -17,6 +17,7 @@ use crate::health_score::{health_score, calc_dynamic_roam_margin};
 use crate::power_state::{PowerState, PowerStateManager};
 use crate::state_machine::{StateMachine, SwitchHint};
 use crate::station_info::{iw_station_dump, parse_iw_station, retry_rate, StationSample};
+use crate::bssid_stats::BssidStat;
 use crate::web::{Readiness, ReadyStep, StatusSnapshot, SwitchEvent, ThresholdsView};
 use crate::wpa_ctrl::WpaCtrl;
 
@@ -119,6 +120,8 @@ impl HoldKind {
 struct HoldState {
     until: Instant,
     kind: HoldKind,
+    /// true=自动触发（流量保护），false=手动触发（用户点击）
+    is_auto: bool,
 }
 
 /// status.txt：状态边沿立即写；相同内容最多 15s 写一次
@@ -586,6 +589,7 @@ fn status_summary_zh(
 }
 
 mod band_bond;
+mod bssid_stats;
 mod config;
 mod file_log;
 mod health_score;
@@ -652,6 +656,8 @@ fn main() {
     let snapshot = Arc::new(Mutex::new(StatusSnapshot::new()));
     // 手切 / 观影 分种类保护；HTTP 可 clear / soft-pause
     let hold_state: Arc<Mutex<Option<HoldState>>> = Arc::new(Mutex::new(None));
+    let bssid_stats_map: Arc<Mutex<HashMap<String, BssidStat>>> =
+        Arc::new(Mutex::new(bssid_stats::load()));
     let history: Arc<Mutex<VecDeque<SwitchEvent>>> =
         Arc::new(Mutex::new(load_history()));
     let mut sm = StateMachine::new();
@@ -665,6 +671,7 @@ fn main() {
     let snapshot_http = Arc::clone(&snapshot);
     let config_http = Arc::clone(&config);
     let hold_http = Arc::clone(&hold_state);
+    let bssid_http = Arc::clone(&bssid_stats_map);
     let wpa_http = Arc::clone(&wpa);
     let history_http = Arc::clone(&history);
     thread::spawn(move || {
@@ -923,6 +930,7 @@ fn main() {
                     *hold_http.lock().unwrap() = Some(HoldState {
                         until,
                         kind: HoldKind::SoftPause,
+                        is_auto: false,
                     });
                     if let Ok(mut s) = snapshot_http.lock() {
                         let rem = mins * 60;
@@ -1088,6 +1096,16 @@ fn main() {
                     notify::test();
                     json_resp(r#"{"ok":true}"#.into(), StatusCode(200))
                 }
+                (Method::Get, "/api/bssid-memory/clear") | (Method::Post, "/api/bssid-memory/clear") => {
+                    if let Ok(mut m) = bssid_http.lock() {
+                        bssid_stats::clear_all(&mut m);
+                    }
+                    if let Ok(mut s) = snapshot_http.lock() {
+                        s.bssid_demoted_count = 0;
+                    }
+                    log::info!("bssid memory cleared via API");
+                    json_resp(r#"{"ok":true}"#.into(), StatusCode(200))
+                }
                 (Method::Post, "/api/connect") => {
                     let body = read_body(&mut req);
                     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
@@ -1107,6 +1125,7 @@ fn main() {
                                     *hold_http.lock().unwrap() = Some(HoldState {
                                         until: Instant::now() + Duration::from_secs(hold_secs),
                                         kind: HoldKind::Manual,
+                                        is_auto: false,
                                     });
                                 }
                                 json_resp(
@@ -1245,24 +1264,30 @@ fn main() {
 
     let mut weak_bad_since: Option<Instant> = None;
     let mut weak_disconnected = false;
-    /// 最近扫描到的偏好侧最强 RSSI（供阈值对照）
+    // 最近扫描到的偏好侧最强 RSSI（供阈值对照）
     let mut cached_best_5g: Option<i32> = None;
-    /// 同一目标连续失败次数 → 加长冷却，避免狂点把系统网「管理员停用」
+    // 同一目标连续失败次数 → 加长冷却，避免狂点把系统网「管理员停用」
     let mut fail_streak_key = String::new();
     let mut fail_streak: u32 = 0;
     let mut fail_backoff_until: Option<Instant> = None;
-    /// 防重复：switch None 日志最多 30s 一条
+    // 防重复：switch None 日志最多 30s 一条
     let mut last_no_target_log: Option<Instant> = None;
     let mut last_no_target_reason: String = String::new();
 
-    /// wpa 连续失败退避（避免 WiFi 关闭时每秒刷屏重试）
+    // wpa 连续失败退避（避免 WiFi 关闭时每秒刷屏重试）
     let mut wpa_fail_streak: u32 = 0;
     let mut last_wpa_reconnect: Option<Instant> = None;
     let mut last_wpa_fail_log: Option<Instant> = None;
 
-    /// 模块热更新检测：启动时记录关键文件 mtime
+    // 模块热更新检测：启动时记录关键文件 mtime
     let mut start_mtimes = record_module_mtimes();
     let mut last_mtime_check = Instant::now();
+    // —— 自动观影保护状态 ——
+    let mut auto_soft_active = false;
+    let mut auto_soft_high_since: Option<Instant> = None;
+    let mut auto_soft_started_at: Option<Instant> = None;
+    let mut auto_soft_low_since: Option<Instant> = None;
+    let mut cached_traffic_kbps: Option<f32> = None;
 
     loop {
         let (
@@ -1290,6 +1315,14 @@ fn main() {
                 notify_weak,
                 notify_ongoing_secs,
                 allow_weak_off_home,
+                soft_auto_enable,
+                soft_auto_on_kb,
+                soft_auto_off_kb,
+                soft_auto_trigger_secs,
+                soft_auto_release_secs,
+                soft_auto_max_mins,
+                bssid_memory_enable,
+                bssid_demote_secs,
             ) = {
                 let c = config.lock().unwrap();
                 (
@@ -1317,6 +1350,14 @@ fn main() {
                 c.notify_weak,
                 c.notify_ongoing_secs,
                 c.allow_weak_off_home,
+                c.soft_auto_enable,
+                c.soft_auto_on_kb,
+                c.soft_auto_off_kb,
+                c.soft_auto_trigger_secs,
+                c.soft_auto_release_secs,
+                c.soft_auto_max_mins,
+                c.bssid_memory_enable,
+                c.bssid_demote_secs,
             )
         };
 
@@ -1466,6 +1507,7 @@ fn main() {
                     *hold_state.lock().unwrap() = Some(HoldState {
                         until,
                         kind: HoldKind::Manual,
+                        is_auto: false,
                     });
                     sm.reset_soft();
                     log::info!(
@@ -1503,6 +1545,7 @@ fn main() {
                             let cur = parse_iw_station(&raw);
                             let rate = retry_rate(&prev_station, &cur);
                             let delta = cur.tx_packets.saturating_sub(prev_station.tx_packets);
+                            cached_traffic_kbps = crate::station_info::traffic_rate_kbps(&prev_station, &cur);
                             prev_station = cur;
                             cached_retry = rate;
                             cached_tx_delta = delta;
@@ -1541,6 +1584,102 @@ fn main() {
                 }
             };
 
+            // —— 自动观影保护状态机 ——
+            if soft_auto_enable && !screen_off && !paused {
+                let kbps = cached_traffic_kbps.unwrap_or(0.0);
+                if auto_soft_active {
+                    // 保护中：检查是否该解除
+                    if kbps < soft_auto_off_kb as f32 {
+                        // 流量低于解除线：开始计时
+                        if auto_soft_low_since.is_none() {
+                            auto_soft_low_since = Some(Instant::now());
+                        }
+                        let low_elapsed = auto_soft_low_since
+                            .map(|t| t.elapsed().as_secs())
+                            .unwrap_or(0);
+                        // 防死锁：超过 max_mins 强制退出
+                        let max_secs = soft_auto_max_mins * 60;
+                        let over_max = max_secs > 0
+                            && auto_soft_started_at
+                                .map(|t| t.elapsed().as_secs() >= max_secs)
+                                .unwrap_or(false);
+                        if low_elapsed >= soft_auto_release_secs || over_max {
+                            // 退出自动保护
+                            auto_soft_active = false;
+                            auto_soft_started_at = None;
+                            auto_soft_low_since = None;
+                            auto_soft_high_since = None;
+                            if let Ok(mut h) = hold_state.lock() {
+                                if h.as_ref().is_some_and(|s| s.kind == HoldKind::SoftPause && s.is_auto) {
+                                    *h = None;
+                                }
+                            }
+                            log::info!(
+                                "auto soft-pause released: traffic={kbps:.0} KB/s, low for {low_elapsed}s"
+                            );
+                        }
+                    } else {
+                        // 流量仍在解除线以上：滑动续期 30s + 重置低流量计时
+                        auto_soft_low_since = None;
+                        if let Ok(mut h) = hold_state.lock() {
+                            if let Some(s) = h.as_mut() {
+                                if s.kind == HoldKind::SoftPause && s.is_auto {
+                                    s.until = Instant::now() + Duration::from_secs(30);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // 未保护中：检查是否该触发
+                    if kbps >= soft_auto_on_kb as f32 {
+                        if auto_soft_high_since.is_none() {
+                            auto_soft_high_since = Some(Instant::now());
+                        }
+                        let high_elapsed = auto_soft_high_since
+                            .map(|t| t.elapsed().as_secs())
+                            .unwrap_or(0);
+                        if high_elapsed >= soft_auto_trigger_secs && hold_rem_now == 0 {
+                            // 触发自动保护
+                            auto_soft_active = true;
+                            auto_soft_started_at = Some(Instant::now());
+                            auto_soft_high_since = None;
+                            auto_soft_low_since = None;
+                            if let Ok(mut h) = hold_state.lock() {
+                                *h = Some(HoldState {
+                                    until: Instant::now() + Duration::from_secs(30),
+                                    kind: HoldKind::SoftPause,
+                                    is_auto: true,
+                                });
+                            }
+                            log::info!(
+                                "auto soft-pause triggered: traffic={kbps:.0} KB/s for {high_elapsed}s"
+                            );
+                        }
+                    } else {
+                        auto_soft_high_since = None;
+                    }
+                }
+            } else {
+                // 息屏/暂停/关闭：重置触发计时但保留 active 状态（息屏前已触发的保护继续）
+                auto_soft_high_since = None;
+                if !auto_soft_active {
+                    auto_soft_low_since = None;
+                }
+            }
+
+            let (hold_rem_now, hold_kind_now) = {
+                let h = hold_state.lock().unwrap();
+                match h.as_ref() {
+                    Some(st) if Instant::now() < st.until => (
+                        st.until
+                            .saturating_duration_since(Instant::now())
+                            .as_secs(),
+                        Some(st.kind),
+                    ),
+                    _ => (0, None),
+                }
+            };
+
             let in_home_now = link_in_home(&home_aps, &bssid_now, &ssid_now);
             let pen_rem = sm.penalty_remaining_secs();
 
@@ -1558,7 +1697,11 @@ fn main() {
             let block_reason = if paused {
                 "已暂停守护".to_string()
             } else if let Some(k) = hold_kind_now {
-                k.block_zh(hold_rem_now)
+                if auto_soft_active && k == HoldKind::SoftPause {
+                    format!("观影保护中（自动·剩 {hold_rem_now}s，不自动切网）")
+                } else {
+                    k.block_zh(hold_rem_now)
+                }
             } else if pen_rem > 0 {
                 format!("切换冷却中（剩 {pen_rem}s）")
             } else if screen_off {
@@ -1596,6 +1739,15 @@ fn main() {
                 s.score = score;
                 s.hold_remaining_secs = hold_rem_now;
                 s.hold_kind = hold_kind_now.map(|k| k.as_str().into()).unwrap_or_default();
+                if auto_soft_active && s.hold_kind == "soft_pause" {
+                    s.hold_kind = "soft_pause_auto".into();
+                }
+                s.traffic_rate_kb = cached_traffic_kbps.unwrap_or(0.0);
+                s.bssid_demoted_count = if bssid_memory_enable {
+                    bssid_stats::get_demoted(&bssid_stats_map.lock().unwrap()).len()
+                } else {
+                    0
+                };
                 s.user_hold_secs = hold_secs;
                 s.link_ctrl = "ok".into();
                 s.home_ap_count = home_aps.len();
@@ -1606,7 +1758,11 @@ fn main() {
                 s.penalty_remaining_secs = pen_rem;
                 s.bssid_lock_remaining_secs = lock_rem_secs;
                 s.summary = if let Some(k) = hold_kind_now {
-                    k.summary_zh(hold_rem_now)
+                    if auto_soft_active && k == HoldKind::SoftPause {
+                        format!("观影保护（自动）· {hold_rem_now}s（可点结束保护）")
+                    } else {
+                        k.summary_zh(hold_rem_now)
+                    }
                 } else {
                     status_summary_zh(
                         band,
@@ -1634,7 +1790,11 @@ fn main() {
                     if weak_disconnected {
                         s.power_state = "WEAK_OFF".into();
                     } else if let Some(k) = hold_kind_now {
-                        s.power_state = k.power_state(hold_rem_now);
+                        s.power_state = if auto_soft_active && k == HoldKind::SoftPause {
+                            format!("SOFT_PAUSE_AUTO({hold_rem_now}s)")
+                        } else {
+                            k.power_state(hold_rem_now)
+                        };
                     } else if !in_home_now && !home_aps.is_empty() {
                         s.power_state = "OUT_OF_HOME".into();
                     } else if screen_off {
@@ -1805,6 +1965,11 @@ fn main() {
                 let ssid = ssid_now;
                 let cur_bssid = bssid_now;
                 let cur_is_5g = band == "5";
+                let demoted = if bssid_memory_enable {
+                    bssid_stats::get_demoted(&bssid_stats_map.lock().unwrap())
+                } else {
+                    Vec::new()
+                };
 
                 let mut roam_fire = false;
                 let mut target = match hint {
@@ -1812,54 +1977,59 @@ fn main() {
                     SwitchHint::Downswitch => {
                         roam_pending = None;
                         // 同频优选（逃生）：≥+8 dB 先换同频；否则下切非偏好
-                        best_on_band(
+                        best_on_band_with(
                             &scans,
                             &ssid,
                             preferred_is_5g,
                             rssi + 8,
                             &home_aps,
+                            &demoted,
                         )
                         .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid))
                         .or_else(|| {
-                            best_on_band(
+                            best_on_band_with(
                                 &scans,
                                 &ssid,
                                 !preferred_is_5g,
                                 -80,
                                 &home_aps,
+                                &demoted,
                             )
                         })
                     }
                     SwitchHint::Upswitch => {
                         roam_pending = None;
-                        best_on_band(
+                        best_on_band_with(
                             &scans,
                             &ssid,
                             preferred_is_5g,
                             up_rssi,
                             &home_aps,
+                            &demoted,
                         )
                     }
                     SwitchHint::SameBandRoam => None, // 由下方主循环填充
                     SwitchHint::None if weak_rescue => {
                         roam_pending = None;
                         // 救援：① 同频更强(+5dB) ② 否则 2.4 且明显高于断开阈值
-                        let better_same = best_on_band(
+                        let better_same = best_on_band_with(
                             &scans,
                             &ssid,
                             cur_is_5g,
                             rssi + 5,
                             &home_aps,
+                            &demoted,
                         )
                         .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid));
                         better_same.or_else(|| {
                             if cur_is_5g {
-                                best_on_band(
+                                best_on_band_with(
                                     &scans,
                                     &ssid,
                                     false,
                                     -80,
                                     &home_aps,
+                                    &demoted,
                                 )
                                 .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid))
                             } else {
@@ -1873,12 +2043,13 @@ fn main() {
                 // 追优：仅同频更好家网 AP（不下 2.4）；dB 主判，分<观察线作门
                 if target.is_none() && want_roam_probe {
                     let margin = calc_dynamic_roam_margin(rssi, roam_margin_db);
-                    let better = best_on_band(
+                    let better = best_on_band_with(
                         &scans,
                         &ssid,
                         preferred_is_5g,
                         rssi + margin,
                         &home_aps,
+                        &demoted,
                     )
                     .filter(|a| !a.bssid.eq_ignore_ascii_case(&cur_bssid));
                     if let Some(peer) = better {
@@ -2182,6 +2353,12 @@ fn main() {
                             if ok {
                                 sm.finish_switch_ok();
                                 fail_streak = 0;
+                                if bssid_memory_enable {
+                                    if let Ok(mut m) = bssid_stats_map.lock() {
+                                        bssid_stats::record_success(&mut m, &peer.bssid);
+                                        bssid_stats::save(&m);
+                                    }
+                                }
                                 fail_streak_key.clear();
                                 fail_backoff_until = None;
                                 if bssid_lock_secs > 0 {
@@ -2217,12 +2394,21 @@ fn main() {
                                     fail_streak_key = bond_key.clone();
                                     fail_streak = 1;
                                 }
+                                if bssid_memory_enable {
+                                    if let Ok(mut m) = bssid_stats_map.lock() {
+                                        bssid_stats::record_fail(&mut m, &peer.bssid, bssid_demote_secs);
+                                        bssid_stats::save(&m);
+                                    }
+                                }
                                 // 连续失败 ≥3：退避 3～5 分钟，别把网打停用
                                 if fail_streak >= 3 {
                                     let back = 180 + (fail_streak as u64 - 3) * 60;
                                     let back = back.min(600);
                                     fail_backoff_until =
                                         Some(Instant::now() + Duration::from_secs(back));
+                                    if notify_enable {
+                                        notify::fail_backoff(&peer.ssid, back);
+                                    }
                                     log::warn!(
                                         "switch fail streak={fail_streak} target={bond_key} → backoff {back}s"
                                     );
@@ -2379,6 +2565,15 @@ fn main() {
                 s.hold_kind = hold_kind_now
                     .map(|k| k.as_str().into())
                     .unwrap_or_default();
+                if auto_soft_active && s.hold_kind == "soft_pause" {
+                    s.hold_kind = "soft_pause_auto".into();
+                }
+                s.traffic_rate_kb = cached_traffic_kbps.unwrap_or(0.0);
+                s.bssid_demoted_count = if bssid_memory_enable {
+                    bssid_stats::get_demoted(&bssid_stats_map.lock().unwrap()).len()
+                } else {
+                    0
+                };
                 s.user_hold_secs = hold_secs;
                 s.home_ap_count = home_aps.len();
                 s.link_ctrl = "reconnect".into();
@@ -2386,21 +2581,33 @@ fn main() {
                 s.block_reason = if paused {
                     "已暂停守护".into()
                 } else if let Some(k) = hold_kind_now {
-                    k.block_zh(hold_rem)
+                    if auto_soft_active && k == HoldKind::SoftPause {
+                        format!("观影保护中（自动·剩 {hold_rem}s，不自动切网）")
+                    } else {
+                        k.block_zh(hold_rem)
+                    }
                 } else if screen_off {
                     "息屏降频，不主动切网".into()
                 } else {
                     "链路控制异常，正在重连 wpa".into()
                 };
                 s.summary = if let Some(k) = hold_kind_now {
-                    k.summary_zh(hold_rem)
+                    if auto_soft_active && k == HoldKind::SoftPause {
+                        format!("观影保护（自动）· {hold_rem}s（可点结束保护）")
+                    } else {
+                        k.summary_zh(hold_rem)
+                    }
                 } else if screen_off {
                     "息屏降频".into()
                 } else {
                     "链路控制 · 重连中".into()
                 };
                 if let Some(k) = hold_kind_now {
-                    s.power_state = k.power_state(hold_rem);
+                    s.power_state = if auto_soft_active && k == HoldKind::SoftPause {
+                        format!("SOFT_PAUSE_AUTO({hold_rem}s)")
+                    } else {
+                        k.power_state(hold_rem)
+                    };
                 } else if paused {
                     s.power_state = "PAUSE".into();
                 } else if screen_off {

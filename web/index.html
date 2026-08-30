@@ -136,6 +136,7 @@ button:disabled{opacity:.45}
 [data-theme="light"] .logbox{background:#1a1d24;color:#d0d6e0}
 .setting-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}
 .setting-row:last-child{border-bottom:0}
+.setting-row .val{color:var(--amber);font-variant-numeric:tabular-nums}
 .switch{position:relative;display:inline-block;width:44px;height:24px;flex-shrink:0}
 .switch input{opacity:0;width:0;height:0}
 .slider{position:absolute;cursor:pointer;inset:0;background:var(--line);border-radius:24px;transition:.3s}
@@ -476,6 +477,72 @@ nav.tabs button.on .ic{text-shadow:0 0 12px rgba(240,160,48,.5)}
         </div>
         <p class="okm" id="setMsg"></p>
         <p class="err" id="setErr"></p>
+      </div>
+      <div class="card">
+        <h2>自动观影保护</h2>
+        <p class="note detail" style="margin-top:0">大流量场景（视频/下载/热点）自动暂停切换，避免卡顿</p>
+        <div class="setting-row">
+          <div>启用自动大流量保护</div>
+          <label class="switch"><input type="checkbox" id="softAutoEnable" onchange="saveSoftAuto()" checked><span class="slider"></span></label>
+        </div>
+        <div class="field">
+          <label>触发速率 <span class="val" id="softAutoOnVal">400 KB/s</span></label>
+          <div class="ctrl">
+            <input type="range" id="softAutoOnKb" min="100" max="5000" step="50" value="400" oninput="$('softAutoOnVal').textContent=this.value+' KB/s'" onchange="saveSoftAuto()">
+          </div>
+        </div>
+        <div class="field">
+          <label>解除速率 <span class="val" id="softAutoOffVal">80 KB/s</span></label>
+          <div class="ctrl">
+            <input type="range" id="softAutoOffKb" min="20" max="1000" step="10" value="80" oninput="$('softAutoOffVal').textContent=this.value+' KB/s'" onchange="saveSoftAuto()">
+          </div>
+        </div>
+        <div class="field">
+          <label>触发等待 <span class="val" id="softAutoTriggerVal">12 秒</span></label>
+          <div class="ctrl">
+            <input type="range" id="softAutoTriggerSecs" min="3" max="60" step="1" value="12" oninput="$('softAutoTriggerVal').textContent=this.value+' 秒'" onchange="saveSoftAuto()">
+          </div>
+        </div>
+        <div class="field">
+          <label>解除等待 <span class="val" id="softAutoReleaseVal">45 秒</span></label>
+          <div class="ctrl">
+            <input type="range" id="softAutoReleaseSecs" min="10" max="180" step="5" value="45" oninput="$('softAutoReleaseVal').textContent=this.value+' 秒'" onchange="saveSoftAuto()">
+          </div>
+        </div>
+        <div class="setting-row">
+          <div>最长保护 <span class="val" id="softAutoMaxVal">4 小时</span></div>
+          <select id="softAutoMaxMins" onchange="saveSoftAuto()">
+            <option value="60">1 小时</option>
+            <option value="120">2 小时</option>
+            <option value="240" selected>4 小时</option>
+            <option value="0">不限</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <div>当前吞吐</div>
+          <span class="val" id="trafficRateVal">—</span>
+        </div>
+      </div>
+      <div class="card">
+        <h2>AP 质量记忆</h2>
+        <p class="note detail" style="margin-top:0">连续失败的 AP 自动隔离，避免反复踩坑</p>
+        <div class="setting-row">
+          <div>启用故障 AP 自动降权</div>
+          <label class="switch"><input type="checkbox" id="bssidMemoryEnable" onchange="saveBssidMemory()" checked><span class="slider"></span></label>
+        </div>
+        <div class="setting-row">
+          <div>故障隔离时长 <span class="val" id="bssidDemoteVal">30 分钟</span></div>
+          <select id="bssidDemoteSecs" onchange="saveBssidMemory()">
+            <option value="600">10 分钟</option>
+            <option value="1800" selected>30 分钟</option>
+            <option value="3600">60 分钟</option>
+            <option value="7200">120 分钟</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <div>降权中 AP 数 <span class="val" id="bssidDemotedCount">0</span></div>
+          <button type="button" onclick="clearBssidMemory()" style="color:var(--warn)">重置记忆</button>
+        </div>
       </div>
       <div class="card">
         <h2>模块</h2>
@@ -1029,6 +1096,8 @@ function syncSettingsForm() {
   if ($('notifyWeak')) $('notifyWeak').checked = c.notify_weak === true;
   if ($('allowWeakOffHome')) $('allowWeakOffHome').checked = c.allow_weak_off_home === true;
   if ($('notifyOngoing')) $('notifyOngoing').value = c.notify_ongoing_secs || 0;
+  syncSoftAutoForm(c);
+  syncBssidMemoryForm(c);
   homeSelected = {};
   (c.home_aps || []).forEach(h => {
     if (h.bssid) homeSelected[h.bssid.toLowerCase()] = { bssid: h.bssid, ssid: h.ssid || '', band: h.band || 'auto' };
@@ -1320,6 +1389,92 @@ async function saveLockSecs() {
   }
 }
 
+function syncSoftAutoForm(cfg) {
+  if (!$('softAutoEnable') || !cfg) return;
+  $('softAutoEnable').checked = cfg.soft_auto_enable !== false;
+  if (cfg.soft_auto_on_kb != null) {
+    $('softAutoOnKb').value = cfg.soft_auto_on_kb;
+    $('softAutoOnVal').textContent = cfg.soft_auto_on_kb + ' KB/s';
+  }
+  if (cfg.soft_auto_off_kb != null) {
+    $('softAutoOffKb').value = cfg.soft_auto_off_kb;
+    $('softAutoOffVal').textContent = cfg.soft_auto_off_kb + ' KB/s';
+  }
+  if (cfg.soft_auto_trigger_secs != null) {
+    $('softAutoTriggerSecs').value = cfg.soft_auto_trigger_secs;
+    $('softAutoTriggerVal').textContent = cfg.soft_auto_trigger_secs + ' 秒';
+  }
+  if (cfg.soft_auto_release_secs != null) {
+    $('softAutoReleaseSecs').value = cfg.soft_auto_release_secs;
+    $('softAutoReleaseVal').textContent = cfg.soft_auto_release_secs + ' 秒';
+  }
+  if (cfg.soft_auto_max_mins != null) {
+    $('softAutoMaxMins').value = cfg.soft_auto_max_mins;
+    var maxLabel = {'60':'1 小时','120':'2 小时','240':'4 小时','0':'不限'};
+    $('softAutoMaxVal').textContent = maxLabel[String(cfg.soft_auto_max_mins)] || cfg.soft_auto_max_mins + ' 分钟';
+  }
+}
+
+async function saveSoftAuto() {
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        soft_auto_enable: $('softAutoEnable').checked,
+        soft_auto_on_kb: parseInt($('softAutoOnKb').value, 10),
+        soft_auto_off_kb: parseInt($('softAutoOffKb').value, 10),
+        soft_auto_trigger_secs: parseInt($('softAutoTriggerSecs').value, 10),
+        soft_auto_release_secs: parseInt($('softAutoReleaseSecs').value, 10),
+        soft_auto_max_mins: parseInt($('softAutoMaxMins').value, 10)
+      }),
+      cache: 'no-store'
+    });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    if (j.config) { cfgCache = j; syncSoftAutoForm(j.config); }
+    showToast('已保存');
+  } catch (e) { showToast('保存失败: ' + e.message); }
+}
+
+function syncBssidMemoryForm(cfg) {
+  if (!$('bssidMemoryEnable') || !cfg) return;
+  $('bssidMemoryEnable').checked = cfg.bssid_memory_enable !== false;
+  if (cfg.bssid_demote_secs != null) {
+    $('bssidDemoteSecs').value = cfg.bssid_demote_secs;
+    var demoteLabel = {'600':'10 分钟','1800':'30 分钟','3600':'60 分钟','7200':'120 分钟'};
+    $('bssidDemoteVal').textContent = demoteLabel[String(cfg.bssid_demote_secs)] || cfg.bssid_demote_secs + ' 秒';
+  }
+}
+
+async function saveBssidMemory() {
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bssid_memory_enable: $('bssidMemoryEnable').checked,
+        bssid_demote_secs: parseInt($('bssidDemoteSecs').value, 10)
+      }),
+      cache: 'no-store'
+    });
+    const j = await r.json();
+    if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+    if (j.config) { cfgCache = j; syncBssidMemoryForm(j.config); }
+    showToast('已保存');
+  } catch (e) { showToast('保存失败: ' + e.message); }
+}
+
+async function clearBssidMemory() {
+  try {
+    const r = await fetch('/api/bssid-memory/clear', { method: 'POST', cache: 'no-store' });
+    if (r.ok) {
+      if ($('bssidDemotedCount')) $('bssidDemotedCount').textContent = '0';
+      showToast('记忆已重置');
+    } else { showToast('重置失败'); }
+  } catch (e) { showToast('网络错误'); }
+}
+
 let logRawContent = '';
 let logFilterOn = false;
 
@@ -1529,6 +1684,15 @@ async function tick() {
           if (val) val.textContent = t[f.key];
         }
       }
+    }
+    if ($('trafficRateVal')) {
+      var rate = j.traffic_rate_kb || 0;
+      $('trafficRateVal').textContent = rate >= 1024
+        ? (rate / 1024).toFixed(1) + ' MB/s'
+        : Number(rate).toFixed(0) + ' KB/s';
+    }
+    if ($('bssidDemotedCount')) {
+      $('bssidDemotedCount').textContent = j.bssid_demoted_count || 0;
     }
   } catch (e) {
     $('conn').textContent = '离线';

@@ -12,7 +12,7 @@ pub struct StatusSnapshot {
     pub thresholds: ThresholdsView,
     /// 保护剩余秒数（0=未在保护）；手切或观影
     pub hold_remaining_secs: u64,
-    /// 保护种类："" | "manual" | "soft_pause"
+    /// 保护种类："" | "manual" | "soft_pause" | "soft_pause_auto"
     pub hold_kind: String,
     /// 配置的手切保护时长（便于设置页展示）
     pub user_hold_secs: u64,
@@ -40,6 +40,10 @@ pub struct StatusSnapshot {
     pub summary: String,
     /// 切后 BSSID 短锁剩余秒（0=未锁）
     pub bssid_lock_remaining_secs: u64,
+    /// 当前双向流量速率（KB/s，0=无数据）
+    pub traffic_rate_kb: f32,
+    /// 当前被降权隔离的 AP 数量
+    pub bssid_demoted_count: usize,
     /// 守护进程版本号（编译时注入）
     pub version: String,
     /// 模块热更新检测结果（None=无更新）
@@ -276,6 +280,8 @@ impl StatusSnapshot {
             best_5g_rssi: None,
             summary: String::new(),
             bssid_lock_remaining_secs: 0,
+            traffic_rate_kb: 0.0,
+            bssid_demoted_count: 0,
             version: env!("CARGO_PKG_VERSION").into(),
             update_info: None,
         }
@@ -286,7 +292,7 @@ impl StatusSnapshot {
         let th = &self.thresholds;
         // ponytail: manual JSON, ~50% less codegen than serde_json
         format!(
-            r#"{{"rssi":{},"score":{},"band":"{}","state":"{}","ssid":"{}","power_state":"{}","last_error":"{}","thresholds":{{"score_detect_threshold":{},"score_switch_threshold":{},"upswitch_rssi_min_dbm":{},"mode":"{}"}},"hold_remaining_secs":{},"hold_kind":"{}","user_hold_secs":{},"link_ctrl":"{}","home_ap_count":{},"in_home":{},"block_reason":"{}","penalty_remaining_secs":{},"screen":"{}","l3_last":"{}","bssid":"{}","threshold_hint":"{}","best_5g_rssi":{},"summary":"{}","bssid_lock_remaining_secs":{},"version":"{}","update_info":{}}}"#,
+            r#"{{"rssi":{},"score":{},"band":"{}","state":"{}","ssid":"{}","power_state":"{}","last_error":"{}","thresholds":{{"score_detect_threshold":{},"score_switch_threshold":{},"upswitch_rssi_min_dbm":{},"mode":"{}"}},"hold_remaining_secs":{},"hold_kind":"{}","user_hold_secs":{},"link_ctrl":"{}","home_ap_count":{},"in_home":{},"block_reason":"{}","penalty_remaining_secs":{},"screen":"{}","l3_last":"{}","bssid":"{}","threshold_hint":"{}","best_5g_rssi":{},"summary":"{}","bssid_lock_remaining_secs":{},"traffic_rate_kb":{},"bssid_demoted_count":{},"version":"{}","update_info":{}}}"#,
             self.rssi, self.score, json_esc(&self.band), json_esc(&self.state),
             json_esc(&self.ssid), json_esc(&self.power_state), json_esc(&self.last_error),
             th.score_detect_threshold, th.score_switch_threshold, th.upswitch_rssi_min_dbm,
@@ -297,7 +303,7 @@ impl StatusSnapshot {
             json_esc(&self.screen), json_esc(&self.l3_last), json_esc(&self.bssid),
             json_esc(&self.threshold_hint),
             match self.best_5g_rssi { Some(v) => v.to_string(), None => "null".into() },
-            json_esc(&self.summary), self.bssid_lock_remaining_secs, json_esc(&self.version),
+            json_esc(&self.summary), self.bssid_lock_remaining_secs, self.traffic_rate_kb, self.bssid_demoted_count, json_esc(&self.version),
             match &self.update_info {
                 Some(u) => u.to_json(),
                 None => "null".into(),

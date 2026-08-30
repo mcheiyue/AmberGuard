@@ -95,13 +95,12 @@ pub fn event(title: &str, text: &str) {
         EV_SEQ += 1;
         format!("{EVENT_PREFIX}{EV_SEQ}")
     };
-    let msg = format!("{title}：{text}");
     run_notify(&[
         "post",
         "-t",
         title,
         &id,
-        &msg,
+        text,
     ]);
 }
 
@@ -111,13 +110,12 @@ pub fn event_id(title: &str, text: &str, id: &str) {
         return;
     }
     allow_assistant();
-    let msg = format!("{title}：{text}");
     run_notify(&[
         "post",
         "-t",
         title,
         id,
-        &msg,
+        text,
     ]);
 }
 
@@ -166,5 +164,18 @@ pub fn test() {
     event(
         "AmberGuard",
         "通知测试：如果你看到这条，说明通知功能正常工作。",
+    );
+}
+
+/// 切换失败退避通知（连续3次失败进入退避时触发一次，用固定 ID 原地覆盖）
+pub fn fail_backoff(ssid: &str, back_secs: u64) {
+    if !cmd_available() {
+        return;
+    }
+    let back_mins = back_secs / 60;
+    event_id(
+        "AmberGuard",
+        &format!("切换至「{ssid}」连续失败，已暂停尝试 {back_mins} 分钟"),
+        "amber_fail_backoff",
     );
 }
