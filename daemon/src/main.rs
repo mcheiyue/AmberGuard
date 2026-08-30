@@ -308,7 +308,7 @@ fn record_module_mtimes() -> ModuleFileMtimes {
         .ok()
         .and_then(|m| m.modified().ok());
     ModuleFileMtimes {
-        binary: std::fs::metadata("/proc/self/exe").ok().and_then(|m| m.modified().ok()),
+        binary: std::fs::metadata(dir.join("bin/amberguard")).ok().and_then(|m| m.modified().ok()),
         sepolicy: mtime("sepolicy.rule"),
         post_fs_data: mtime("post-fs-data.sh"),
         service_sh: mtime("service.sh"),
@@ -317,7 +317,8 @@ fn record_module_mtimes() -> ModuleFileMtimes {
 
 /// 检查 bin/amberguard 的 mtime 是否变化（模块被更新）
 fn binary_changed(start: &ModuleFileMtimes) -> bool {
-    let cur = std::fs::metadata("/proc/self/exe")
+    let dir = module_dir().unwrap_or_else(|| std::path::PathBuf::from("/data/adb/modules/AmberGuard"));
+    let cur = std::fs::metadata(dir.join("bin/amberguard"))
         .ok()
         .and_then(|m| m.modified().ok());
     match (start.binary, cur) {
@@ -1362,9 +1363,9 @@ fn main() {
                 // 需重启/需重置：发系统通知，不开面板也能看到
                 notify::event("AmberGuard 已更新", &msg);
                 // 首检后刷新 binary 基线，止住每 5s 重复触发（Branch B 防通知堆叠）
-                start_mtimes.binary = std::fs::metadata("/proc/self/exe")
-                    .ok()
-                    .and_then(|m| m.modified().ok());
+                start_mtimes.binary = std::fs::metadata(
+                    module_dir().unwrap_or_else(|| std::path::PathBuf::from("/data/adb/modules/AmberGuard")).join("bin/amberguard")
+                ).ok().and_then(|m| m.modified().ok());
             }
         }
 
