@@ -9,7 +9,7 @@ const STORE_PATHS: &[&str] = &[
     "/data/misc/wifi/WifiConfigStore.xml",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WifiSecurity {
     Open,
     Wpa2,
@@ -161,13 +161,22 @@ pub fn merge_saved_ssids(wpa_ssids: &[String]) -> Vec<String> {
 }
 
 /// 推断安全类型：list-networks > ConfigKey > 默认 wpa2
+/// 同 SSID 多条记录时优先选更强安全类型（Wpa3 > Wpa2 > Open），
+/// 避免同名 Open 记录覆盖真实 WPA2 配置。
 pub fn security_for_ssid(ssid: &str) -> WifiSecurity {
+    let mut best: Option<WifiSecurity> = None;
     for (s, sec) in network_rows_from_cmd() {
         if s == ssid {
             if let Some(sec) = sec {
-                return sec;
+                best = Some(match best {
+                    Some(current) => current.max(sec),
+                    None => sec,
+                });
             }
         }
+    }
+    if let Some(sec) = best {
+        return sec;
     }
     if let Some(raw) = read_store_raw() {
         if let Some(sec) = security_from_store(&raw, ssid) {
