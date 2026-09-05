@@ -164,6 +164,9 @@ pub fn merge_saved_ssids(wpa_ssids: &[String]) -> Vec<String> {
 /// 同 SSID 多条记录时优先选更强安全类型（Wpa3 > Wpa2 > Open），
 /// 避免同名 Open 记录覆盖真实 WPA2 配置。
 pub fn security_for_ssid(ssid: &str) -> WifiSecurity {
+    if let Some((sec, _)) = read_store_config(ssid) {
+        return sec;
+    }
     let mut best: Option<WifiSecurity> = None;
     for (s, sec) in network_rows_from_cmd() {
         if s == ssid {
@@ -184,6 +187,60 @@ pub fn security_for_ssid(ssid: &str) -> WifiSecurity {
         }
     }
     WifiSecurity::Wpa2
+}
+
+fn read_store_config(ssid: &str) -> Option<(WifiSecurity, Option<String>)> {
+    let raw = read_store_raw()?;
+    store_config_for_ssid(&raw, ssid)
+}
+
+fn store_config_for_ssid(raw: &str, ssid: &str) -> Option<(WifiSecurity, Option<String>)> {
+    let mut block = Vec::new();
+    let mut open_config = None;
+    for line in raw.lines() {
+        block.push(line);
+        if line.contains("</Network>") {
+            if let Some((security, psk)) = parse_store_config_block(&block, ssid) {
+                if psk.is_some() {
+                    return Some((security, psk));
+                }
+                open_config = Some((security, None));
+            }
+            block.clear();
+        }
+    }
+    open_config
+}
+
+fn parse_store_config_block(lines: &[&str], ssid: &str) -> Option<(WifiSecurity, Option<String>)> {
+    let ssid_line = lines
+        .iter()
+        .find(|line| line.contains("name=\"SSID\"") || line.contains("name='SSID'"))?;
+    if extract_quoted_xml_string(ssid_line)? != ssid {
+        return None;
+    }
+    let key = lines
+        .iter()
+        .find(|line| line.contains("name=\"ConfigKey\"") || line.contains("name='ConfigKey'"))?;
+    let key = extract_quoted_xml_string(key)?;
+    let security = if key.ends_with("WPA_PSK") {
+        WifiSecurity::Wpa2
+    } else if key.ends_with("SAE") || key.ends_with("WPA3") {
+        WifiSecurity::Wpa3
+    } else {
+        WifiSecurity::Open
+    };
+    let psk = lines
+        .iter()
+        .find(|line| line.contains("name=\"PreSharedKey\"") || line.contains("name='PreSharedKey'"))
+        .and_then(|line| {
+            if line.contains("<null") {
+                None
+            } else {
+                extract_quoted_xml_string(line).filter(|value| !value.is_empty())
+            }
+        });
+    Some((security, psk))
 }
 
 fn security_from_store(raw: &str, ssid: &str) -> Option<WifiSecurity> {
@@ -210,6 +267,9 @@ fn security_from_store(raw: &str, ssid: &str) -> Option<WifiSecurity> {
 }
 
 fn psk_from_store(ssid: &str) -> Result<String, String> {
+    if let Some((_, Some(psk))) = read_store_config(ssid) {
+        return Ok(psk);
+    }
     let raw = read_store_raw().ok_or_else(|| {
         format!(
             "读不到 WifiConfigStore（无 root 或路径变化）。请确认已用系统设置连接并保存「{ssid}」。"
@@ -396,5 +456,42 @@ mod tests {
         assert_eq!(parse_sec_token("wpa2-psk"), Some(WifiSecurity::Wpa2));
         assert_eq!(parse_sec_token("wpa3-sae^"), Some(WifiSecurity::Wpa3));
         assert_eq!(parse_sec_token("open"), Some(WifiSecurity::Open));
+    }
+
+    #[test]
+    fn store_skips_none_record_before_wpa_psk_record() {
+        let raw = concat!(
+            "<Network><WifiConfiguration>\n",
+            "<string name=\"ConfigKey\">&quot;Cafe&quot;NONE</string>\n",
+            "<string name=\"SSID\">&quot;Cafe&quot;</string>\n",
+            "<null name=\"PreSharedKey\" />\n",
+            "</WifiConfiguration></Network>\n",
+            "<Network><WifiConfiguration>\n",
+            "<string name=\"ConfigKey\">&quot;Cafe&quot;WPA_PSK</string>\n",
+            "<string name=\"SSID\">&quot;Cafe&quot;</string>\n",
+            "<string name=\"PreSharedKey\">&quot;secret123&quot;</string>\n",
+            "</WifiConfiguration></Network>"
+        );
+
+        assert_eq!(
+            store_config_for_ssid(raw, "Cafe"),
+            Some((WifiSecurity::Wpa2, Some("secret123".to_string())))
+        );
+    }
+
+    #[test]
+    fn store_keeps_open_record_without_psk() {
+        let raw = concat!(
+            "<Network><WifiConfiguration>\n",
+            "<string name=\"ConfigKey\">&quot;Cafe&quot;NONE</string>\n",
+            "<string name=\"SSID\">&quot;Cafe&quot;</string>\n",
+            "<null name=\"PreSharedKey\" />\n",
+            "</WifiConfiguration></Network>"
+        );
+
+        assert_eq!(
+            store_config_for_ssid(raw, "Cafe"),
+            Some((WifiSecurity::Open, None))
+        );
     }
 }
